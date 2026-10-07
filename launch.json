@@ -1,0 +1,30 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "CabalHook",
+    "constructorArgs": [
+      "$poolManager",
+      "0x000000000000000000000000000000000000dead",
+      "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+      "0x000000000000000000000000000000000000dead"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap"
+    ]
+  },
+  "token": {
+    "contract": "CabalCoin",
+    "name": "CabalCoin",
+    "symbol": "CABAL",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "BLOCKING: No authorized initialOwner or launchFactory address is provided by the brief or repository. Constructor arguments 2 and 4 are explicit burn-address sentinels, not production identities. Do not deploy this manifest: replace both with independently authorized concrete addresses and re-review the manifest and creation code. The factory must be the immediate caller of PoolManager.initialize; the sentinel prevents the real factory from initializing, and the sentinel owner cannot bind CabalGate. Constructor order is (IPoolManager manager, address initialOwner, IERC20 pair, address factory). CABAL is inferred from the initialized PoolKey, so this constructor has no $token argument.\nEthereum mainnet, CABAL/IMD. CabalCoin is a standard ERC-20 with plain transfers and a no-argument constructor. CabalHook declares exactly beforeInitialize, beforeSwap and afterSwap (flags 8384 / 0x20c0); each callback requires PoolManager. Initialization binds one sorted CABAL/IMD pool, requires the configured factory, and accepts fee 12500 and tick spacing 60. All return-delta permissions are false. The 1.25% LP fee is separate from the hook fee. initialPrice is decimal sqrtPriceX96 = 2^96: a 1:1 ratio of currency1/currency0 minor units, matching the local fixture. This is an explicit starting-price assumption because no economic launch price was supplied.\nCabalGate must be separately deployed after pool initialization and bound once by the hook owner using setGate. Token-plus-hook deployment alone leaves swaps disabled. Only the bound gate may swap, using exact input. Factory seeding, liquidity addition/removal and LP fee claims are ungated. Each successful buy/sell pays two independently rounded floor(IMD volume / 400) legs: one to 0x000000000000000000000000000000000000dEaD, one into permanent hook-owned, single-sided v4 positions outside the current price. Dust carries forward; compound collects and reinvests fees without principal withdrawal. Buys pay the hook fee in addition to input; sells deduct it from IMD output. The gate prefunds settlement and calls finishSwap inside the unlock; callbacks do not transfer fees from unsettled manager balances.\nCabalGate exposes submitBuyRequest, submitSellRequest, executeBuyRequest and executeSellRequest. Submission pulls exactly Intake.priceOf(action, IMD), approves that amount, calls request with the callback, and clears approval. Defaults use Intake 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56, action oracle.request@oracle-1 and signer 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982. Reasons are UTF-8 validated, JSON-escaped and capped at 280 characters; questions at 2000. Panel settings are 30/20, bool, 900 seconds and initially one hour. Questions label reasons untrusted, assess limits and optional NFT holdings; sells include holdings share, recorded cost and first-buy time.\nOnly the request's Intake may deliver a pending EIP-712 result. The callback verifies and stores only; true permits requester-only, single-use execution for at most 300 seconds, capped by attestation expiry. Users must first set a nonzero minimumOutput with setSlippageLimit; clearRequest releases unanswered requests after one hour without refunding oracle costs. Owner configuration covers oracle endpoints, signer, action, window and limits; changes invalidate old executions. IMD can change only before pool binding.\nRelease integration remains blocked on the separately deployed gate/configuration and verification of the reconstructed oracle ABI/typehash, assumed Intake domain verifier and bool type code 0 against production. Cost basis covers observed gate trades; plain transfers and other pools are outside the gate's enforcement. Notes do not authorize deployment or set launch policy."
+}
