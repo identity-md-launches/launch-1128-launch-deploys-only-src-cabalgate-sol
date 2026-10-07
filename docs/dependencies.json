@@ -1,0 +1,26 @@
+[
+  {
+    "repository": "https://github.com/Uniswap/v4-core",
+    "ref": "main",
+    "commit": "46c6834698c48bc4a463a86d8420f4eb1d7f3b75",
+    "directory": "lib/v4-core"
+  },
+  {
+    "repository": "https://github.com/foundry-rs/forge-std",
+    "ref": "v1.9.7",
+    "commit": "77041d2ce690e692d6e03cc812b57d1ddaa4d505",
+    "directory": "lib/forge-std"
+  },
+  {
+    "repository": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+    "ref": "v5.3.0",
+    "commit": "e4f70216d759d8e6a64144a9e1f7bbeed78e7079",
+    "directory": "lib/openzeppelin-contracts"
+  },
+  {
+    "repository": "https://github.com/transmissions11/solmate",
+    "ref": "main",
+    "commit": "89365b880c4f3c786bdd453d4b8e8fe410344a69",
+    "directory": "lib/solmate"
+  }
+]
