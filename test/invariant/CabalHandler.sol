@@ -20,6 +20,12 @@ contract CabalHandler is CabalFixture {
 
     address internal constant CAROL = address(0xCA401);
     address[3] public actors = [ALICE, BOB, CAROL];
+    string[4] internal REASONS = [
+        "Pay the October community server bill",
+        'Settle the "October" invoice \\ hosting"},"quorum":0,"q":"',
+        unicode"Régler la facture d'hébergement d'octobre — 十月のサーバー代",
+        unicode"Fund the October meetup 🐉🔥 ¢ª¬ “quoted” ‹angles›"
+    ];
     bytes32[] public ids;
     mapping(bytes32 => CabalGate.Status) public expectedStatus;
     mapping(address => bytes32) public expectedActive;
@@ -65,10 +71,11 @@ contract CabalHandler is CabalFixture {
         if (max < 400) return;
         uint256 amount = bound(amountSeed, 400, max);
         uint256 beforeBalance = imd.balanceOf(user);
+        // Reasons of every shape the escaper handles, so the stored question and the callback's recomputed
+        // hash are exercised with quotes, backslashes and multibyte text, not only plain ASCII.
+        string memory reason = REASONS[amountSeed % REASONS.length];
         vm.prank(user);
-        bytes32 id = isBuy
-            ? gate.submitBuyRequest(amount, "Pay the October community server bill")
-            : gate.submitSellRequest(amount, "Pay the October community server bill");
+        bytes32 id = isBuy ? gate.submitBuyRequest(amount, reason) : gate.submitSellRequest(amount, reason);
         assertEq(imd.balanceOf(user), beforeBalance - intake.price(), "submission must charge only oracle price");
         chargedOracle += intake.price();
         assertEq(uint8(expectedStatus[id]), uint8(CabalGate.Status.None), "ID reuse");

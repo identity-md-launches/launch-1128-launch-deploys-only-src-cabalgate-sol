@@ -135,4 +135,54 @@ contract EconomicPropertiesTest is CabalFixture {
         assertGt(gate.executeSellRequest(id), 0);
         assertSettled();
     }
+
+    /// @dev Submission checks the seller's balance, execution pulls it: a holder who moved the tokens away in
+    ///      between is refused by the token, the reconciliation the gate ran first is rolled back with the rest,
+    ///      and the approval survives to execute once the tokens are back.
+    function test_sellApprovalSurvivesBalanceDropAndExecutesOnceRestored() public {
+        uint256 acquired = buy(100 ether);
+        bytes32 id = submit(false, acquired);
+        approve(id);
+        (uint256 units, uint256 cost, uint64 first) = gate.holdings(ALICE);
+        vm.prank(ALICE);
+        token.transfer(BOB, acquired - 1);
+        vm.prank(ALICE);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, ALICE, 1, acquired));
+        gate.executeSellRequest(id);
+        assertEq(uint8(gate.getRequest(id).status), uint8(CabalGate.Status.Approved));
+        assertEq(gate.activeRequest(ALICE), id);
+        (uint256 unitsAfter, uint256 costAfter, uint64 firstAfter) = gate.holdings(ALICE);
+        assertEq(unitsAfter, units, "reverted reconciliation leaked into the ledger");
+        assertEq(costAfter, cost);
+        assertEq(firstAfter, first);
+        assertSettled();
+        vm.prank(BOB);
+        token.transfer(ALICE, acquired - 1);
+        vm.prank(ALICE);
+        assertGt(gate.executeSellRequest(id), 0);
+        (unitsAfter, costAfter, firstAfter) = gate.holdings(ALICE);
+        assertEq(unitsAfter, 0);
+        assertEq(costAfter, 0);
+        assertEq(firstAfter, 0);
+        assertEq(token.balanceOf(ALICE), 0);
+        assertSettled();
+    }
+
+    /// @dev A sell approved for more than the gate has recorded (tokens received by plain transfer) reduces the
+    ///      record to zero and never underflows; the cost basis follows proportionally and is zeroed with it.
+    function test_sellLargerThanTrackedHoldingsClearsTheRecordWithoutUnderflow() public {
+        uint256 acquired = buy(100 ether);
+        token.transfer(ALICE, acquired);
+        bytes32 id = submit(false, acquired * 2);
+        approve(id);
+        vm.prank(ALICE);
+        uint256 output = gate.executeSellRequest(id);
+        assertGt(output, 0);
+        (uint256 units, uint256 cost, uint64 first) = gate.holdings(ALICE);
+        assertEq(units, 0);
+        assertEq(cost, 0);
+        assertEq(first, 0);
+        assertEq(token.balanceOf(ALICE), 0);
+        assertSettled();
+    }
 }
