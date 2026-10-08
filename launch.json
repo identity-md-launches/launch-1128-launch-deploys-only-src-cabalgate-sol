@@ -1,0 +1,29 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "CabalHook",
+    "constructorArgs": [
+      "$poolManager",
+      "$owner",
+      "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap"
+    ]
+  },
+  "token": {
+    "contract": "CabalCoin",
+    "name": "CabalCoin",
+    "symbol": "CABAL",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "Ethereum mainnet, CABAL/IMD. CabalCoin is a standard ERC-20 with plain transfers, 18 decimals and a no-argument constructor. CabalHook's constructor is (IPoolManager manager, address initialOwner, IERC20 pair), written as $poolManager, $owner and the IMD address 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7. The hook infers CABAL from the initialized PoolKey as the currency other than IMD, so it takes no $token argument. $owner resolves at deployment to the owner the request named, else the paying wallet 0xfc3c962fad2c1cc77f1a0d46e7b8a2de79a21774, the project's owner. That account is the only one able to call the one-time setGate that binds CabalGate after pool initialization; no buy or sell can pass until it does. The hook's address(0)/0xdead fallback to the launch originator is not exercised with an explicit owner. Ownership is two-step (Ownable2Step).\nCabalHook declares exactly beforeInitialize, beforeSwap and afterSwap (flags 8384 / 0x20c0); every callback requires msg.sender == PoolManager, and all return-delta permissions are false. beforeInitialize binds the first pool whoever initializes it (the factory deploys and initializes in one transaction), and accepts only fee 12500, tick spacing 60, a sorted ERC-20 pair with IMD on one side and the hook itself; any later pool is refused. The 1.25% LP fee is the policy's pool fee and is separate from the hook fee. initialPrice is decimal sqrtPriceX96 = 2^96, a 1:1 ratio of currency1/currency0 minor units matching the local fixture; it is an explicit assumption because no launch price was supplied, and the hook accepts any initial price.\nTrading: only the bound CabalGate may swap, exact input only. Factory seeding, liquidity addition/removal, donations and LP fee claims are ungated. Each successful buy or sell pays two independently rounded floor(IMD volume / 400) legs: one to 0x000000000000000000000000000000000000dEaD, one into permanent hook-owned single-sided v4 positions outside the current price; anyone may call compound to reinvest accrued fees, principal is never withdrawn. Buys pay the hook fee in addition to input; sells deduct it from IMD output. The gate prefunds settlement and calls finishSwap inside its unlock; callbacks never take fees from unsettled manager balances, so a freshly seeded manager works.\nCabalGate exposes submitBuyRequest, submitSellRequest, executeBuyRequest and executeSellRequest. Submission pulls exactly Intake.priceOf(action, IMD), approves it, calls request with the onOracleResult callback and clears the approval. Defaults: Intake 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56, action oracle.request@oracle-1, signer 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982. Reasons are UTF-8 validated, JSON-escaped and capped at 280 characters, questions at 2000, definitions at 512; panel 30/20, bool, 900 seconds, one-hour window. Only the request's Intake may deliver a pending EIP-712 result (IdentityMD Oracle v2, chainId 1); the callback verifies and stores only, and true permits requester-only single-use execution for at most 300 seconds. Execution needs a nonzero user minimum output; clearRequest releases unanswered requests after one hour without refunding oracle cost. Owner configuration covers Intake, action, IMD (before binding only), signer, window and limits; changes invalidate old approvals.\nNotes do not authorize deployment or set launch policy; supply and allocations come from the launch policy."
+}
