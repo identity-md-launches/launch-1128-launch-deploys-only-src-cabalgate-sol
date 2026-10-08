@@ -166,7 +166,7 @@ contract QuestionPropertiesTest is Test {
         assertEq(vm.parseJsonUint(body, ".window.hours"), 1);
         assertEq(vm.parseJsonUint(body, ".panelSize"), 30);
         assertEq(vm.parseJsonUint(body, ".quorum"), 20);
-        assertEq(vm.parseJsonUint(body, ".validForSeconds"), 900);
+        assertEq(vm.parseJsonUint(body, ".validForSeconds"), 3900);
         assertEq(vm.parseJsonString(body, ".answerType"), "bool");
         assertEq(vm.parseJsonString(body, ".evidence"), "panel");
         assertEq(vm.parseJsonUint(body, ".consumer.chainId"), 1);

@@ -106,7 +106,8 @@ contract QuestionBuilder {
             escapedQuestion,
             '","quorum":',
             c.quorum.toString(),
-            ',"v":1,"validForSeconds":900,"window":{"hours":',
+            // Cover the gate's one-hour request timeout plus its five-minute execution window.
+            ',"v":1,"validForSeconds":3900,"window":{"hours":',
             c.windowHours.toString(),
             "}}"
         );

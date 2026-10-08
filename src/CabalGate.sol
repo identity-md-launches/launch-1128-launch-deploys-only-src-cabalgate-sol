@@ -96,7 +96,7 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     uint256 public constant APPROVAL_WINDOW = 5 minutes;
     /// @dev The oracle stamps issuedAt from its own clock; allow it to run slightly ahead of block time.
     uint256 public constant CLOCK_TOLERANCE = 5 minutes;
-    /// @dev Sanity bound on expiresAt - issuedAt; the body asks for 900 seconds.
+    /// @dev Sanity bound on expiresAt - issuedAt.
     uint256 public constant MAX_VALIDITY = 1 days;
     address public constant IDENTITY_NFT = MainnetDefaults.IDENTITY_NFT;
     CabalHook public immutable hook;
@@ -124,7 +124,21 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event RequestCleared(bytes32 indexed id);
     event RequestExecuted(bytes32 indexed id, uint256 input, uint256 output, uint256 fee);
 
-    constructor(CabalHook launchHook, address initialOwner, Config memory initialConfig) Ownable(initialOwner) {
+    constructor(
+        CabalHook launchHook,
+        address initialOwner,
+        address intake,
+        address imd,
+        address signer,
+        bytes32 action,
+        uint128 maxBuyAmount,
+        uint128 maxSellAmount,
+        uint16 maxImpactBps,
+        uint16 maxDriftBps,
+        uint16 panelSize,
+        uint16 quorum,
+        uint8 windowHours
+    ) Ownable(initialOwner) {
         if (!launchHook.initialized()) revert InvalidConfig();
         hook = launchHook;
         poolManager = launchHook.poolManager();
@@ -132,7 +146,23 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         _key = launchHook.poolKey();
         questionBuilder = new QuestionBuilder();
         estimator = new ImpactEstimator(poolManager, _key);
-        _configure(initialConfig);
+        _configure(
+            Config({
+                intake: intake,
+                imd: imd,
+                signer: signer,
+                oracleVerifier: address(this),
+                action: action,
+                maxBuyAmount: maxBuyAmount,
+                maxSellAmount: maxSellAmount,
+                maxImpactBps: maxImpactBps,
+                maxDriftBps: maxDriftBps,
+                panelSize: panelSize,
+                quorum: quorum,
+                windowHours: windowHours,
+                boolAnswerType: 0
+            })
+        );
     }
 
     /// @notice Default mainnet configuration: this gate is the attestation's verifying contract.

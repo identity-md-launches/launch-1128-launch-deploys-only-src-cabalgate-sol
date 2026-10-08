@@ -15,7 +15,7 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @dev Stand-in for the network's launch factory: deploys the token, then the hook at a mined CREATE2 salt, then
-///      initializes the pool, all in one call, exactly as the manifest's one-transaction launch does.
+///      initializes the pool, all in one call, as the earlier token/hook launch did; the current launch is in GateLaunch.t.sol.
 contract LaunchFactory {
     CabalCoin public token;
     CabalHook public hook;
@@ -41,7 +41,7 @@ contract LaunchFactory {
     }
 }
 
-/// @notice Rehearses the launch with the arguments the manifest can express: `$poolManager`, an unspecified
+/// @notice Historical token/hook launch regression with the arguments its manifest could express: `$poolManager`, an unspecified
 ///         owner written as 0xdead, and the IMD literal. The whole trading flow then runs on that deployment.
 contract LaunchTest is CabalFixture {
     using StateLibrary for IPoolManager;
@@ -74,7 +74,7 @@ contract LaunchTest is CabalFixture {
         assertTrue(tx.origin != address(this) && tx.origin != address(factory));
         assertEq(hook.gate(), address(gate));
         // Binding happened once, from the owner; it cannot be repeated or done by anyone else.
-        CabalGate another = new CabalGate(hook, address(this), defaultConfig());
+        CabalGate another = deployGate(hook);
         vm.prank(address(factory));
         vm.expectRevert();
         hook.setGate(address(another));

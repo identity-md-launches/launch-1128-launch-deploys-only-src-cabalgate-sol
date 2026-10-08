@@ -67,7 +67,7 @@ abstract contract CabalFixture is Test {
         _launch(imd0, oneSided ? TickMath.getSqrtPriceAtTick(imd0 ? UPPER : LOWER) : Q96);
         modify(LOWER, UPPER, int256(SEED_LIQUIDITY));
         intake = new MockIntake();
-        gate = new CabalGate(hook, address(this), defaultConfig());
+        gate = deployGate(hook);
         vm.prank(hook.owner());
         hook.setGate(address(gate));
         vm.startPrank(ALICE);
@@ -96,7 +96,31 @@ abstract contract CabalFixture is Test {
         manager.initialize(key, price);
     }
 
-    /// @dev oracleVerifier left zero: the gate substitutes itself, as a deployer who cannot predict its address would.
+    function deployGate(CabalHook launchHook) internal returns (CabalGate) {
+        CabalGate.Config memory cfg = defaultConfig();
+        return CabalGate(
+            deployCode(
+                "CabalGate.sol:CabalGate",
+                abi.encode(
+                    launchHook,
+                    address(this),
+                    cfg.intake,
+                    cfg.imd,
+                    cfg.signer,
+                    cfg.action,
+                    cfg.maxBuyAmount,
+                    cfg.maxSellAmount,
+                    cfg.maxImpactBps,
+                    cfg.maxDriftBps,
+                    cfg.panelSize,
+                    cfg.quorum,
+                    cfg.windowHours
+                )
+            )
+        );
+    }
+
+    /// @dev The flat constructor selects the gate itself as verifier and the canonical boolean type.
     function defaultConfig() internal view returns (CabalGate.Config memory) {
         return CabalGate.Config(
             address(intake),

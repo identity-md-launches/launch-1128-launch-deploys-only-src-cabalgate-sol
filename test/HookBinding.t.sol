@@ -121,7 +121,7 @@ contract HookBindingTest is CabalFixture {
         manager.initialize(intended, Q96);
         vm.expectRevert(CabalHook.InvalidPool.selector);
         fresh.setIMD(IERC20(address(token)));
-        CabalGate forRogue = new CabalGate(fresh, address(this), defaultConfig());
+        CabalGate forRogue = deployGate(fresh);
         assertEq(address(forRogue.cabal()), address(rogue));
         vm.expectRevert(CabalHook.InvalidGate.selector);
         fresh.setGate(address(gate));
@@ -177,7 +177,7 @@ contract HookBindingTest is CabalFixture {
         lp.swap(k, true, -1 ether);
         vm.expectRevert();
         lp.swap(k, false, -1 ether);
-        CabalGate bound = new CabalGate(fresh, address(this), defaultConfig());
+        CabalGate bound = deployGate(fresh);
         fresh.setGate(address(bound));
         lp.modify(k, LOWER, UPPER, 1 ether);
         lp.donate(k, 3 ether, 0);

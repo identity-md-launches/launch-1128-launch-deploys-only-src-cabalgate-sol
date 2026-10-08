@@ -35,7 +35,7 @@ contract OracleTest is CabalFixture {
         assertEq(vm.parseJsonUint(body, ".panelSize"), 30);
         assertEq(vm.parseJsonUint(body, ".quorum"), 20);
         assertEq(vm.parseJsonUint(body, ".window.hours"), 1);
-        assertEq(vm.parseJsonUint(body, ".validForSeconds"), 900);
+        assertEq(vm.parseJsonUint(body, ".validForSeconds"), 3900);
         assertEq(vm.parseJsonString(body, ".answerType"), "bool");
         assertEq(vm.parseJsonString(body, ".evidence"), "panel");
         assertEq(vm.parseJsonUint(body, ".consumer.chainId"), 1);
@@ -52,7 +52,7 @@ contract OracleTest is CabalFixture {
         assertTrue(contains(body, '","impact":"'));
         assertTrue(contains(body, '","reason":"'));
         assertTrue(contains(body, '"},"evidence":"panel","panelSize":30,"question":"'));
-        assertTrue(contains(body, '","quorum":20,"v":1,"validForSeconds":900,"window":{"hours":1}}'));
+        assertTrue(contains(body, '","quorum":20,"v":1,"validForSeconds":3900,"window":{"hours":1}}'));
         // The stored escaped question is exactly the body's question string.
         assertTrue(contains(body, string.concat('"question":"', string(gate.questionOf(id)), '","quorum"')));
         assertEq(keccak256(bytes(jsonEscape(question))), keccak256(gate.questionOf(id)));
