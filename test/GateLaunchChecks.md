@@ -2,6 +2,14 @@
 
 The production constructor already has the thirteen flat arguments. Tests reuse the initialized-hook mock and existing dependencies; the added suites do not deploy CabalHook or CabalCoin. The existing launch fixture was extracted into an abstract base without changing its assertions.
 
+## Revision verification (2026-10-08)
+
+The prior rejection reported exhausted workspace credits, with no compiler or test failure. The accepted suites were retained. One regression was added to `GateFactoryEdges.t.sol`: when the hook reports a mismatched IMD during the constructor's final configuration validation, the gate and both helpers must disappear; retrying the identical CREATE2 deployment after restoring the dependency must succeed at the same predicted address and remain bindable by the hook owner.
+
+Using Foundry 1.8.3 and Solidity 0.8.26, `forge build` passed and `forge test` passed all 162 tests across 24 suites, with no failures or skipped tests. `GateFactoryEdgesTest` passed all nine tests. The gate-only invariant campaign and both existing trading invariant campaigns each completed 256 runs and 16,384 calls with zero unexpected reverts. Output and cache remained under `test/scratch/` through the process variables shown below. `git diff --check` passed.
+
+The manifest reproduction was rerun and failed with `AssertionError`: `launch.json` still selects `univ4_hook`, `CabalHook` and `CabalCoin`, with no CabalGate contracts entry. `.imd-findings.json` records that unresolved mismatch with a standalone Python reproduction and the exact expected thirteen arguments. No source, dependency, manifest or configuration file was changed.
+
 ## Commands and results
 
 Build artifacts and caches were placed under disposable `test/scratch/` using the process variables `FOUNDRY_OUT=test/scratch/out` and `FOUNDRY_CACHE_PATH=test/scratch/cache`. No configuration file or shared test environment was changed.

@@ -113,6 +113,41 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         assertEq(MockLaunchHook(HOOK).gate(), address(0));
     }
 
+    function test_failedConfigurationRollsBackHelpersAndSameDeploymentCanRetry() public {
+        bytes memory creation = _creation(_arguments());
+        bytes32 salt = keccak256("retry failed gate constructor");
+        address predicted = vm.computeCreate2Address(salt, keccak256(creation), address(factory));
+        address builder = vm.computeCreateAddress(predicted, 1);
+        address estimator = vm.computeCreateAddress(predicted, 2);
+
+        // _configure runs after both helpers are created. A late dependency mismatch
+        // must roll back the entire deployment, including those child contracts.
+        vm.mockCall(HOOK, abi.encodeWithSelector(MockLaunchHook(HOOK).imd.selector), abi.encode(INTAKE));
+        vm.expectRevert("application constructor failed");
+        factory.deploy(creation, salt);
+        assertEq(predicted.code.length, 0);
+        assertEq(builder.code.length, 0);
+        assertEq(estimator.code.length, 0);
+        assertEq(vm.getNonce(predicted), 0);
+        assertEq(MockLaunchHook(HOOK).gate(), address(0));
+
+        vm.clearMockedCalls();
+        CabalGate gate = CabalGate(factory.deploy(creation, salt));
+        assertEq(address(gate), predicted);
+        assertEq(address(gate.questionBuilder()), builder);
+        assertEq(address(gate.estimator()), estimator);
+        assertGt(builder.code.length, 0);
+        assertGt(estimator.code.length, 0);
+        assertEq(gate.owner(), launchOwner);
+        assertEq(gate.configVersion(), 1);
+        assertEq(gate.configuration().oracleVerifier, predicted);
+        assertEq(gate.configuration().boolAnswerType, 0);
+        assertEq(MockLaunchHook(HOOK).gate(), address(0));
+        vm.prank(hookOwner);
+        MockLaunchHook(HOOK).setGate(address(gate));
+        assertEq(MockLaunchHook(HOOK).gate(), predicted);
+    }
+
     function test_hookRejectsMissingCodeWrongHookWrongCabalAndDuplicateBinding() public {
         CabalGate gate = _deploy(keccak256("binding edges"));
         vm.startPrank(hookOwner);
