@@ -18,9 +18,12 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {CabalHook} from "./CabalHook.sol";
 import {QuestionBuilder} from "./QuestionBuilder.sol";
+import {ImpactEstimator} from "./ImpactEstimator.sol";
 import {IIntake, Attestation} from "./interfaces/IIntake.sol";
 import {OracleSignature} from "./libraries/OracleSignature.sol";
 import {MainnetDefaults} from "./libraries/MainnetDefaults.sol";
+import {DataStore} from "./libraries/DataStore.sol";
+import {PriceMath} from "./libraries/PriceMath.sol";
 
 contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     using SafeERC20 for IERC20;
@@ -39,11 +42,17 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         address intake;
         address imd;
         address signer;
+        /// @dev EIP-712 verifyingContract declared to the oracle as the request's consumer; zero means this gate.
         address oracleVerifier;
         bytes32 action;
         uint128 maxBuyAmount;
         uint128 maxSellAmount;
+        /// @dev Cap on one trade's own price movement, estimated at submission and measured at execution.
         uint16 maxImpactBps;
+        /// @dev Cap on the movement between submission and execution caused by anything else.
+        uint16 maxDriftBps;
+        uint16 panelSize;
+        uint16 quorum;
         uint8 windowHours;
         uint8 boolAnswerType;
     }
@@ -59,7 +68,8 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         uint128 amount;
         uint160 sqrtPriceX96;
         uint256 minimumOutput;
-        bytes32 questionHash;
+        /// @dev DataStore pointer holding the JSON-escaped question, read back to verify the signed questionHash.
+        address question;
     }
 
     struct Holding {
@@ -84,15 +94,22 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     uint256 private constant Q96 = 1 << 96;
     uint256 public constant REQUEST_TIMEOUT = 1 hours;
     uint256 public constant APPROVAL_WINDOW = 5 minutes;
+    /// @dev The oracle stamps issuedAt from its own clock; allow it to run slightly ahead of block time.
+    uint256 public constant CLOCK_TOLERANCE = 5 minutes;
+    /// @dev Sanity bound on expiresAt - issuedAt; the body asks for 900 seconds.
+    uint256 public constant MAX_VALIDITY = 1 days;
     address public constant IDENTITY_NFT = MainnetDefaults.IDENTITY_NFT;
     CabalHook public immutable hook;
     IPoolManager public immutable poolManager;
     IERC20 public immutable cabal;
     QuestionBuilder public immutable questionBuilder;
+    ImpactEstimator public immutable estimator;
     PoolKey private _key;
     mapping(bytes32 => Request) private _requests;
     mapping(address => bytes32) public activeRequest;
     mapping(address => Holding) public holdings;
+    /// @notice Oracle attestation id => the gate request it decided; each signed attestation is consumed once.
+    mapping(bytes32 => bytes32) public attestationUsedBy;
     mapping(uint64 => Config) private _configs;
     uint64 public configVersion;
     bool private _executing;
@@ -100,9 +117,9 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     event Configured(uint64 indexed version, Config configuration);
     event RequestSubmitted(
-        bytes32 indexed id, address indexed user, bool buy, uint256 amount, bytes32 questionHash, bytes body
+        bytes32 indexed id, address indexed user, bool buy, uint256 amount, address question, bytes body
     );
-    event OracleResult(bytes32 indexed id, bool approved, uint64 approvedUntil);
+    event OracleResult(bytes32 indexed id, bytes32 indexed attestationId, bool approved, uint64 approvedUntil);
     event SlippageLimitSet(bytes32 indexed id, uint256 minimumOutput);
     event RequestCleared(bytes32 indexed id);
     event RequestExecuted(bytes32 indexed id, uint256 input, uint256 output, uint256 fee);
@@ -114,19 +131,28 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         cabal = IERC20(launchHook.cabal());
         _key = launchHook.poolKey();
         questionBuilder = new QuestionBuilder();
+        estimator = new ImpactEstimator(poolManager, _key);
         _configure(initialConfig);
     }
 
-    function mainnetConfig(uint128 maxBuy, uint128 maxSell, uint16 impact) external pure returns (Config memory) {
+    /// @notice Default mainnet configuration: this gate is the attestation's verifying contract.
+    function mainnetConfig(uint128 maxBuy, uint128 maxSell, uint16 impact, uint16 drift)
+        external
+        view
+        returns (Config memory)
+    {
         return Config(
             MainnetDefaults.INTAKE,
             MainnetDefaults.IMD,
             MainnetDefaults.SIGNER,
-            MainnetDefaults.INTAKE,
+            address(this),
             MainnetDefaults.ACTION,
             maxBuy,
             maxSell,
             impact,
+            drift,
+            30,
+            20,
             1,
             0
         );
@@ -144,6 +170,11 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         return _requests[id];
     }
 
+    /// @notice The stored JSON-escaped question of a request, as it appears inside the body's `question` string.
+    function questionOf(bytes32 id) external view returns (bytes memory) {
+        return DataStore.read(_requests[id].question);
+    }
+
     /// @dev Configuration changes invalidate execution of old approvals. Oracle identities remain snapshotted.
     /// A pool's currency cannot be changed after initialization; a new IMD asset requires a new pool and gate.
     function configure(Config calldata cfg) external onlyOwner nonReentrant {
@@ -151,12 +182,14 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     }
 
     function _configure(Config memory cfg) private {
+        if (cfg.oracleVerifier == address(0)) cfg.oracleVerifier = address(this);
         if (
             cfg.intake.code.length == 0 || cfg.imd != address(hook.imd()) || cfg.imd.code.length == 0
-                || cfg.signer == address(0) || cfg.oracleVerifier == address(0) || cfg.action == bytes32(0)
-                || cfg.maxBuyAmount == 0 || cfg.maxSellAmount == 0 || cfg.maxBuyAmount > uint128(type(int128).max)
+                || cfg.signer == address(0) || cfg.action == bytes32(0) || cfg.maxBuyAmount == 0
+                || cfg.maxSellAmount == 0 || cfg.maxBuyAmount > uint128(type(int128).max)
                 || cfg.maxSellAmount > uint128(type(int128).max) || cfg.maxImpactBps == 0 || cfg.maxImpactBps > 5000
-                || cfg.windowHours == 0 || cfg.windowHours > 24
+                || cfg.maxDriftBps < cfg.maxImpactBps || cfg.maxDriftBps > 5000 || cfg.quorum == 0
+                || cfg.quorum > cfg.panelSize || cfg.panelSize > 1000 || cfg.windowHours == 0 || cfg.windowHours > 24
         ) revert InvalidConfig();
         _configs[++configVersion] = cfg;
         emit Configured(configVersion, cfg);
@@ -197,9 +230,13 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
             timeHeld: h.firstBuy == 0 ? 0 : block.timestamp - h.firstBuy,
             trackedUnits: h.units,
             windowHours: cfg.windowHours,
+            panelSize: cfg.panelSize,
+            quorum: cfg.quorum,
+            verifier: cfg.oracleVerifier,
             nftStatus: _nftStatus(msg.sender)
         });
-        (bytes memory body, bytes32 questionHash) = questionBuilder.build(context, reason);
+        (bytes memory body, bytes memory escapedQuestion) = questionBuilder.build(context, reason);
+        address question = DataStore.write(escapedQuestion);
         IERC20 payment = IERC20(cfg.imd);
         uint256 price = IIntake(cfg.intake).priceOf(cfg.action, cfg.imd);
         uint256 beforePayment = payment.balanceOf(address(this));
@@ -221,29 +258,37 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
             amount: uint128(amount),
             sqrtPriceX96: sqrtPrice,
             minimumOutput: 0,
-            questionHash: questionHash
+            question: question
         });
         activeRequest[msg.sender] = id;
-        emit RequestSubmitted(id, msg.sender, buy, amount, questionHash, body);
+        emit RequestSubmitted(id, msg.sender, buy, amount, question, body);
     }
 
-    /// @notice Verify and store only: no trades, token transfers, JSON construction or NFT reads here.
+    /// @notice Verify and store only: no trades, token transfers or NFT reads here. The Intake calls this with
+    ///         `callbackGas` (200,000 live) and `abi.encode(requestId, attestation, signature)` as the oracle
+    ///         writer delivered it. `requestId` is the Intake's id; `a.requestId` is the oracle's own id, so the
+    ///         attestation is bound to this request through the signed questionHash of the stored question.
     function onOracleResult(bytes32 requestId, Attestation calldata a, bytes calldata signature) external nonReentrant {
         Request storage r = _requests[requestId];
         Config storage cfg = _configs[r.version];
         if (msg.sender != cfg.intake || r.status != Status.Pending) revert UnauthorizedCallback();
         if (block.chainid != 1 || block.timestamp >= r.deadline) revert Expired();
         if (
-            a.requestId != requestId || a.chainId != 1 || a.questionHash != r.questionHash
+            a.requestId == bytes32(0) || attestationUsedBy[a.requestId] != bytes32(0) || a.chainId != 1
                 || a.answerType != cfg.boolAnswerType || a.answer.length != 32 || a.fromBlock > a.toBlock
                 || a.toBlock > block.number || a.blockHash == bytes32(0) || a.panelJobId == bytes32(0)
-                || a.panelSize != 30 || a.quorum != 20 || a.agreementBps < 6667 || a.agreementBps > 10000
-                || a.issuedAt < r.createdAt || a.issuedAt > block.timestamp || a.expiresAt <= block.timestamp
-                || a.expiresAt <= a.issuedAt || a.expiresAt - a.issuedAt > 900
+                || a.panelSize != cfg.panelSize || a.quorum != cfg.quorum || a.agreed < a.quorum
+                || a.agreed > a.panelSize || a.issuedAt < r.createdAt || a.issuedAt > block.timestamp + CLOCK_TOLERANCE
+                || a.expiresAt <= block.timestamp || a.expiresAt <= a.issuedAt
+                || a.expiresAt - a.issuedAt > MAX_VALIDITY
         ) revert InvalidAttestation();
-        if (ECDSA.recover(OracleSignature.digest(a, cfg.oracleVerifier), signature) != cfg.signer) {
+        if (a.questionHash != questionBuilder.questionHash(DataStore.read(r.question), a.fromBlock, a.toBlock)) {
             revert InvalidAttestation();
         }
+        if (ECDSA.recover(OracleSignature.digest(a, 1, cfg.oracleVerifier), signature) != cfg.signer) {
+            revert InvalidAttestation();
+        }
+        attestationUsedBy[a.requestId] = requestId;
         bool approved = abi.decode(a.answer, (bool));
         if (approved) {
             r.status = Status.Approved;
@@ -254,10 +299,10 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
             r.status = Status.Rejected;
             delete activeRequest[r.requester];
         }
-        emit OracleResult(requestId, approved, r.approvedUntil);
+        emit OracleResult(requestId, a.requestId, approved, r.approvedUntil);
     }
 
-    /// @notice Required with the one-argument execute API. Only the requester can choose or update a minimum.
+    /// @notice Stores the minimum output for the one-argument execute functions. Only the requester may set it.
     function setSlippageLimit(bytes32 id, uint256 minimumOutput) external {
         Request storage r = _requests[id];
         if (r.requester != msg.sender) revert NotRequester();
@@ -282,24 +327,38 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         emit RequestCleared(id);
     }
 
+    /// @notice Executes with the minimum output previously stored through setSlippageLimit.
     function executeBuyRequest(bytes32 id) external nonReentrant returns (uint256) {
-        return _execute(id, true);
+        return _execute(id, true, 0);
     }
 
     function executeSellRequest(bytes32 id) external nonReentrant returns (uint256) {
-        return _execute(id, false);
+        return _execute(id, false, 0);
     }
 
-    function _execute(bytes32 id, bool buy) private returns (uint256 output) {
+    /// @notice Executes with an inline minimum output (net of the sell fee), so no separate call is needed.
+    function executeBuyRequest(bytes32 id, uint256 minimumOutput) external nonReentrant returns (uint256) {
+        return _execute(id, true, minimumOutput);
+    }
+
+    function executeSellRequest(bytes32 id, uint256 minimumOutput) external nonReentrant returns (uint256) {
+        return _execute(id, false, minimumOutput);
+    }
+
+    function _execute(bytes32 id, bool buy, uint256 minimumOutput) private returns (uint256 output) {
         if (block.chainid != 1) revert WrongChain();
         Request storage r = _requests[id];
         if (r.requester != msg.sender) revert NotRequester();
         if (r.status != Status.Approved || r.buy != buy || r.version != configVersion) revert InvalidRequest();
         if (block.timestamp >= r.approvedUntil) revert Expired();
+        if (minimumOutput != 0) {
+            r.minimumOutput = minimumOutput;
+            emit SlippageLimitSet(id, minimumOutput);
+        }
         if (r.minimumOutput == 0) revert Slippage();
         Config memory cfg = _configs[r.version];
         (uint160 current,,,) = poolManager.getSlot0(_key.toId());
-        if (priceMovement(r.sqrtPriceX96, current) > cfg.maxImpactBps) revert LimitExceeded();
+        if (priceMovement(r.sqrtPriceX96, current) > cfg.maxDriftBps) revert LimitExceeded();
         _reconcile(msg.sender, cabal.balanceOf(msg.sender));
         r.status = Status.Executed;
         delete activeRequest[msg.sender];
@@ -351,10 +410,8 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         int256 outputDelta = input0 ? int256(delta.amount1()) : int256(delta.amount0());
         if (inputDelta != -int256(uint256(r.amount)) || outputDelta <= 0) revert PartialFill();
         (uint160 afterPrice,,,) = poolManager.getSlot0(_key.toId());
-        if (
-            priceMovement(beforePrice, afterPrice) > cfg.maxImpactBps
-                || priceMovement(r.sqrtPriceX96, afterPrice) > cfg.maxImpactBps
-        ) revert LimitExceeded();
+        // The trade's own movement is bounded by maxImpactBps; drift since submission was bounded before it.
+        if (priceMovement(beforePrice, afterPrice) > cfg.maxImpactBps) revert LimitExceeded();
         uint256 output = uint256(outputDelta);
         poolManager.take(outputCurrency, address(this), output);
         uint256 fee = hook.feeFor(r.buy ? r.amount : output);
@@ -366,28 +423,15 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         return abi.encode(output, fee);
     }
 
-    /// @notice An indicative current-active-range estimate; the panel must assess tick-crossing liquidity.
+    /// @notice Indicative price movement in bps of an exact-input trade, from the current price: active liquidity,
+    ///         or the nearest initialised liquidity in the swap direction when none is active (see ImpactEstimator).
     function estimateImpact(bool buy, uint256 amount) public view returns (uint256) {
-        (uint160 sqrtPrice, int24 tick,,) = poolManager.getSlot0(_key.toId());
-        uint128 liquidity = poolManager.getLiquidity(_key.toId());
-        bool input0 = buy == (Currency.unwrap(_key.currency0) == address(hook.imd()));
-        // A token1-only seed at its upper boundary has zero active liquidity until a downward swap crosses it.
-        if (liquidity == 0 && input0 && sqrtPrice == TickMath.getSqrtPriceAtTick(tick)) {
-            (, int128 netLiquidity) = poolManager.getTickLiquidity(_key.toId(), tick);
-            if (netLiquidity < 0) liquidity = uint128(uint256(-int256(netLiquidity)));
-        }
-        if (liquidity == 0) return 10000;
-        uint256 reserve =
-            input0 ? FullMath.mulDiv(liquidity, Q96, sqrtPrice) : FullMath.mulDiv(liquidity, sqrtPrice, Q96);
-        uint256 net = FullMath.mulDiv(amount, 1_000_000 - _key.fee, 1_000_000);
-        uint256 ratio = FullMath.mulDiv(reserve, Q96, reserve + net);
-        return 10000 - FullMath.mulDiv(FullMath.mulDiv(ratio, ratio, Q96), 10000, Q96);
+        return estimator.estimate(buy == (Currency.unwrap(_key.currency0) == address(hook.imd())), amount);
     }
 
     /// @notice Symmetric relative price movement: 1 - min(priceA,priceB)/max(priceA,priceB).
     function priceMovement(uint160 a, uint160 b) public pure returns (uint256) {
-        uint256 ratio = a < b ? FullMath.mulDiv(a, Q96, b) : FullMath.mulDiv(b, Q96, a);
-        return 10000 - FullMath.mulDiv(FullMath.mulDiv(ratio, ratio, Q96), 10000, Q96);
+        return PriceMath.movement(a, b);
     }
 
     function _spotCabalPrice(uint160 sqrtPrice) private view returns (uint256) {

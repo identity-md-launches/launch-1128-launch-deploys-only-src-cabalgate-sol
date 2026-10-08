@@ -201,8 +201,7 @@ contract TradingTest is CabalFixture {
 
     function test_minOutputMandatoryAndFailedExecutionRollsBackAllTransfers() public {
         bytes32 id = submit(true, 100 ether);
-        Attestation memory a = attestation(id, true);
-        intake.deliver(gate, id, a, sign(a, ORACLE_KEY, address(intake)));
+        deliverTrue(id);
         vm.prank(ALICE);
         vm.expectRevert(CabalGate.Slippage.selector);
         gate.executeBuyRequest(id);
@@ -322,6 +321,119 @@ contract TradingTest is CabalFixture {
             imd.balanceOf(address(this)) + imd.balanceOf(ALICE) + imd.balanceOf(BOB) + imd.balanceOf(address(manager))
                 + imd.balanceOf(address(intake)) + imd.balanceOf(address(hook)) + imd.balanceOf(hook.DEAD())
         );
+    }
+
+    /// @dev Finding: with the seed withdrawn, only the hook's protocol-owned liquidity sits beside the current
+    ///      tick. The estimate follows the swap into it instead of returning the 10000 sentinel, so submissions
+    ///      stay possible, and the estimate tracks the movement the execution path then measures.
+    function test_protocolOwnedLiquidityAloneKeepsSubmissionsOpen() public {
+        uint256 received = buy(100 ether);
+        modify(LOWER, UPPER, -int256(SEED_LIQUIDITY));
+        assertEq(manager.getLiquidity(key.toId()), 0);
+        uint256 sellAmount = received / 2000;
+        uint256 estimate = gate.estimateImpact(false, sellAmount);
+        assertGt(estimate, 0);
+        assertLe(estimate, MAX_IMPACT);
+        // A buy would push the price away from the POL: no liquidity in that direction, so it is refused honestly.
+        assertEq(gate.estimateImpact(true, 1 ether), 10000);
+        vm.prank(ALICE);
+        vm.expectRevert(CabalGate.LimitExceeded.selector);
+        gate.submitBuyRequest(1 ether, "Fund my community research for October");
+        bytes32 id = submit(false, sellAmount);
+        assertEq(uint8(gate.getRequest(id).status), uint8(CabalGate.Status.Pending));
+        approve(id);
+        (uint160 before,,,) = manager.getSlot0(key.toId());
+        vm.prank(ALICE);
+        uint256 out = gate.executeSellRequest(id);
+        (uint160 afterPrice,,,) = manager.getSlot0(key.toId());
+        assertGt(out, 0);
+        uint256 actual = gate.priceMovement(before, afterPrice);
+        assertApproxEqAbs(estimate, actual, 2);
+        assertSettled();
+    }
+
+    function test_estimateMatchesExecutionWithActiveLiquidity() public {
+        uint256 estimate = gate.estimateImpact(true, 1000 ether);
+        bytes32 id = submit(true, 1000 ether);
+        approve(id);
+        (uint160 before,,,) = manager.getSlot0(key.toId());
+        vm.prank(ALICE);
+        gate.executeBuyRequest(id);
+        (uint160 afterPrice,,,) = manager.getSlot0(key.toId());
+        assertApproxEqAbs(estimate, gate.priceMovement(before, afterPrice), 2);
+        assertEq(gate.estimateImpact(true, type(uint128).max), 10000);
+    }
+
+    /// @dev Finding: other traders' approved executions move the price; drift is bounded by maxDriftBps, not by
+    ///      the single-trade impact cap, so an approval for a small trade survives two full-size trades ahead of it.
+    function test_driftFromOtherTradesDoesNotInvalidateApprovalUntilDriftCap() public {
+        CabalGate.Config memory cfg = gate.configuration();
+        cfg.maxBuyAmount = 1e24;
+        gate.configure(cfg);
+        address carol = address(0xCA201);
+        imd.mint(carol, 1_000_000 ether);
+        vm.prank(carol);
+        imd.approve(address(gate), type(uint256).max);
+        bytes32 idA = submit(true, 1000 ether);
+        approve(idA);
+        for (uint256 i; i < 2; ++i) {
+            address who = i == 0 ? BOB : carol;
+            bytes32 id = submitAs(who, true, 140000 ether);
+            approveFor(id, who);
+            vm.prank(who);
+            gate.executeBuyRequest(id);
+        }
+        (uint160 current,,,) = manager.getSlot0(key.toId());
+        uint256 drift = gate.priceMovement(gate.getRequest(idA).sqrtPriceX96, current);
+        assertGt(drift, MAX_IMPACT);
+        assertLe(drift, MAX_DRIFT);
+        vm.prank(ALICE);
+        assertGt(gate.executeBuyRequest(idA), 0);
+        // Past the drift cap the stale approval is refused: with the cap at the impact limit, two more trades
+        // ahead of a new request move the price beyond it.
+        cfg = gate.configuration();
+        cfg.maxDriftBps = MAX_IMPACT;
+        gate.configure(cfg);
+        bytes32 idB = submitAs(BOB, true, 1000 ether);
+        approveFor(idB, BOB);
+        for (uint256 i; i < 2; ++i) {
+            bytes32 id = submitAs(carol, true, 140000 ether);
+            approveFor(id, carol);
+            vm.prank(carol);
+            gate.executeBuyRequest(id);
+        }
+        (current,,,) = manager.getSlot0(key.toId());
+        assertGt(gate.priceMovement(gate.getRequest(idB).sqrtPriceX96, current), MAX_IMPACT);
+        vm.prank(BOB);
+        vm.expectRevert(CabalGate.LimitExceeded.selector);
+        gate.executeBuyRequest(idB);
+    }
+
+    /// @dev Finding: the specified four entry points work without a separate setSlippageLimit call.
+    function test_executeWithInlineMinimumNeedsNoSeparateCall() public {
+        bytes32 id = submit(true, 100 ether);
+        deliverTrue(id);
+        vm.prank(ALICE);
+        vm.expectRevert(CabalGate.Slippage.selector);
+        gate.executeBuyRequest(id, type(uint256).max);
+        vm.prank(BOB);
+        vm.expectRevert(CabalGate.NotRequester.selector);
+        gate.executeBuyRequest(id, 1);
+        vm.prank(ALICE);
+        uint256 received = gate.executeBuyRequest(id, 1);
+        assertGt(received, 0);
+        assertEq(gate.getRequest(id).minimumOutput, 1);
+        bytes32 sellId = submit(false, received);
+        deliverTrue(sellId);
+        vm.prank(ALICE);
+        vm.expectRevert(CabalGate.Slippage.selector);
+        gate.executeSellRequest(sellId);
+        vm.prank(ALICE);
+        vm.expectRevert(CabalGate.Slippage.selector);
+        gate.executeSellRequest(sellId, type(uint256).max);
+        vm.prank(ALICE);
+        assertGt(gate.executeSellRequest(sellId, 1), 0);
+        assertSettled();
     }
 
     function _assertPolPosition() internal view {

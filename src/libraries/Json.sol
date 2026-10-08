@@ -4,6 +4,8 @@ pragma solidity 0.8.26;
 library Json {
     error InvalidUTF8();
     error TextTooLong();
+    error ForbiddenCharacter();
+
     bytes16 private constant HEX = "0123456789abcdef";
 
     /// @notice Counts Unicode scalar values, rejecting malformed/overlong UTF-8 and surrogate encodings.
@@ -34,11 +36,24 @@ library Json {
         }
     }
 
+    /// @notice At most 280 scalar values of valid UTF-8. Control characters are refused because JSON serialisers
+    ///         disagree on their escapes and the oracle's questionHash is computed over its own serialisation;
+    ///         the guillemets « (U+00AB) and » (U+00BB) are refused because they delimit the reason in the question.
     function validateReason(string memory reason) internal pure {
-        if (bytes(reason).length > 1120 || length(bytes(reason)) > 280) revert TextTooLong();
+        bytes memory s = bytes(reason);
+        if (s.length > 1120 || length(s) > 280) revert TextTooLong();
+        for (uint256 i; i < s.length; ++i) {
+            uint8 c = uint8(s[i]);
+            if (c < 0x20) revert ForbiddenCharacter();
+            if (c == 0xc2 && i + 1 < s.length && (uint8(s[i + 1]) == 0xab || uint8(s[i + 1]) == 0xbb)) {
+                revert ForbiddenCharacter();
+            }
+        }
     }
 
-    /// @dev Returns the escaped contents of a JSON string, without surrounding quotes.
+    /// @dev Returns the escaped contents of a JSON string, without surrounding quotes. Only `"` and `\` need
+    ///      escaping for the text this project emits; control characters are kept out of it by validateReason,
+    ///      and the \u00XX form here is only a safety net for them.
     function escape(string memory s) internal pure returns (string memory) {
         bytes memory input = bytes(s);
         bytes memory out = new bytes(input.length * 6);
@@ -59,7 +74,9 @@ library Json {
                 out[k++] = bytes1(c);
             }
         }
-        assembly ("memory-safe") { mstore(out, k) }
+        assembly ("memory-safe") {
+            mstore(out, k)
+        }
         return string(out);
     }
 }

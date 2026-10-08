@@ -34,8 +34,11 @@ abstract contract CabalFixture is Test {
     int24 internal constant LOWER = -1200;
     int24 internal constant UPPER = 1200;
     uint256 internal constant SEED_LIQUIDITY = 10_000_000 ether;
+    uint16 internal constant MAX_IMPACT = 500;
+    uint16 internal constant MAX_DRIFT = 1500;
+    // Published by the live service (GET /oracle/requests/:id/attestation), copied here independently of src/.
     bytes32 internal constant TYPEHASH = keccak256(
-        "OracleAttestation(bytes32 requestId,uint256 chainId,bytes32 questionHash,uint8 answerType,bytes answer,uint64 fromBlock,uint64 toBlock,bytes32 blockHash,bytes32 panelJobId,uint16 panelSize,uint16 quorum,uint16 agreementBps,uint64 issuedAt,uint64 expiresAt)"
+        "OracleAttestation(bytes32 requestId,uint256 chainId,bytes32 questionHash,uint8 answerType,bytes answer,uint256 figure,uint64 fromBlock,uint64 toBlock,bytes32 blockHash,bytes32 panelJobId,uint16 panelSize,uint16 quorum,uint16 agreed,uint64 issuedAt,uint64 expiresAt)"
     );
 
     IPoolManager internal manager;
@@ -78,19 +81,7 @@ abstract contract CabalFixture is Test {
         manager.initialize(key, price);
         modify(LOWER, UPPER, int256(SEED_LIQUIDITY));
         intake = new MockIntake();
-        CabalGate.Config memory cfg = CabalGate.Config(
-            address(intake),
-            address(imd),
-            vm.addr(ORACLE_KEY),
-            address(intake),
-            bytes32("oracle.request@oracle-1"),
-            10000 ether,
-            10000 ether,
-            500,
-            1,
-            0
-        );
-        gate = new CabalGate(hook, address(this), cfg);
+        gate = new CabalGate(hook, address(this), defaultConfig());
         hook.setGate(address(gate));
         vm.startPrank(ALICE);
         imd.approve(address(gate), type(uint256).max);
@@ -98,6 +89,25 @@ abstract contract CabalFixture is Test {
         vm.stopPrank();
         vm.prank(BOB);
         imd.approve(address(gate), type(uint256).max);
+    }
+
+    /// @dev oracleVerifier left zero: the gate substitutes itself, as a deployer who cannot predict its address would.
+    function defaultConfig() internal view returns (CabalGate.Config memory) {
+        return CabalGate.Config(
+            address(intake),
+            address(imd),
+            vm.addr(ORACLE_KEY),
+            address(0),
+            bytes32("oracle.request@oracle-1"),
+            10000 ether,
+            10000 ether,
+            MAX_IMPACT,
+            MAX_DRIFT,
+            30,
+            20,
+            1,
+            0
+        );
     }
 
     function modify(int24 lower, int24 upper, int256 liquidity) internal returns (BalanceDelta delta) {
@@ -139,40 +149,98 @@ abstract contract CabalFixture is Test {
     }
 
     function submit(bool isBuy, uint256 amount) internal returns (bytes32 id) {
-        vm.prank(ALICE);
+        return submitAs(ALICE, isBuy, amount);
+    }
+
+    function submitAs(address who, bool isBuy, uint256 amount) internal returns (bytes32 id) {
+        vm.prank(who);
         return isBuy
             ? gate.submitBuyRequest(amount, "Fund my community research for October")
             : gate.submitSellRequest(amount, "Pay October community hosting expenses");
     }
 
-    function attestation(bytes32 id, bool yes) internal view returns (Attestation memory a) {
-        CabalGate.Request memory r = gate.getRequest(id);
-        a = Attestation(
-            id,
-            1,
-            r.questionHash,
-            0,
-            abi.encode(yes),
-            uint64(block.number - 1),
-            uint64(block.number),
-            keccak256("block"),
-            keccak256("panel job"),
-            30,
-            20,
-            8000,
-            uint64(block.timestamp),
-            uint64(block.timestamp + 900)
+    /// @dev The oracle's own request id is a UUID left-aligned in bytes32 and unrelated to the Intake's id.
+    function oracleIdOf(bytes32 id) internal pure returns (bytes32) {
+        return bytes32(bytes16(keccak256(abi.encode("oracle request", id))));
+    }
+
+    /// @dev Test-side reconstruction of the oracle's questionHash from the body the Intake received: keccak256 of
+    ///      the sorted-key JSON of {answerType, chainId, definitions, evidence, question, v, window{fromBlock,toBlock}}.
+    function expectedQuestionHash(bytes32 id, uint64 fromBlock, uint64 toBlock) internal view returns (bytes32) {
+        string memory body = string(intake.bodyOf(id));
+        return keccak256(
+            abi.encodePacked(
+                '{"answerType":"bool","chainId":1,"definitions":{"amount":"',
+                jsonEscape(vm.parseJsonString(body, ".definitions.amount")),
+                '","costBasis":"',
+                jsonEscape(vm.parseJsonString(body, ".definitions.costBasis")),
+                '","impact":"',
+                jsonEscape(vm.parseJsonString(body, ".definitions.impact")),
+                '","reason":"',
+                jsonEscape(vm.parseJsonString(body, ".definitions.reason")),
+                '"},"evidence":"panel","question":"',
+                jsonEscape(vm.parseJsonString(body, ".question")),
+                '","v":1,"window":{"fromBlock":',
+                vm.toString(uint256(fromBlock)),
+                ',"toBlock":',
+                vm.toString(uint256(toBlock)),
+                "}}"
+            )
         );
+    }
+
+    function jsonEscape(string memory s) internal pure returns (string memory) {
+        bytes memory input = bytes(s);
+        bytes memory out = new bytes(input.length * 2);
+        uint256 k;
+        for (uint256 i; i < input.length; ++i) {
+            if (input[i] == '"' || input[i] == "\\") out[k++] = "\\";
+            out[k++] = input[i];
+        }
+        assembly ("memory-safe") {
+            mstore(out, k)
+        }
+        return string(out);
+    }
+
+    function attestation(bytes32 id, bool yes) internal view returns (Attestation memory a) {
+        uint64 fromBlock = uint64(block.number - 300);
+        uint64 toBlock = uint64(block.number - 1);
+        a = Attestation({
+            requestId: oracleIdOf(id),
+            chainId: 1,
+            questionHash: expectedQuestionHash(id, fromBlock, toBlock),
+            answerType: 0,
+            answer: abi.encode(yes),
+            figure: 0,
+            fromBlock: fromBlock,
+            toBlock: toBlock,
+            blockHash: keccak256("block"),
+            panelJobId: keccak256("panel job"),
+            panelSize: 30,
+            quorum: 20,
+            agreed: 22,
+            issuedAt: uint64(block.timestamp),
+            expiresAt: uint64(block.timestamp + 900)
+        });
     }
 
     // Independent test-side EIP-712 implementation: never call the production digest to sign fixtures.
     function sign(Attestation memory a, uint256 privateKey, address verifier) internal pure returns (bytes memory) {
+        return signFor(a, privateKey, 1, verifier);
+    }
+
+    function signFor(Attestation memory a, uint256 privateKey, uint256 chainId, address verifier)
+        internal
+        pure
+        returns (bytes memory)
+    {
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256("IdentityMD Oracle"),
                 keccak256("2"),
-                uint256(1),
+                chainId,
                 verifier
             )
         );
@@ -184,13 +252,14 @@ abstract contract CabalFixture is Test {
                 a.questionHash,
                 a.answerType,
                 keccak256(a.answer),
+                a.figure,
                 a.fromBlock,
                 a.toBlock,
                 a.blockHash,
                 a.panelJobId,
                 a.panelSize,
                 a.quorum,
-                a.agreementBps,
+                a.agreed,
                 a.issuedAt,
                 a.expiresAt
             )
@@ -199,10 +268,18 @@ abstract contract CabalFixture is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function approve(bytes32 id) internal {
+    function deliverTrue(bytes32 id) internal {
         Attestation memory a = attestation(id, true);
-        intake.deliver(gate, id, a, sign(a, ORACLE_KEY, address(intake)));
-        vm.prank(ALICE);
+        intake.deliver(gate, id, a, sign(a, ORACLE_KEY, address(gate)));
+    }
+
+    function approve(bytes32 id) internal {
+        approveFor(id, ALICE);
+    }
+
+    function approveFor(bytes32 id, address who) internal {
+        deliverTrue(id);
+        vm.prank(who);
         gate.setSlippageLimit(id, 1);
     }
 
@@ -223,5 +300,25 @@ abstract contract CabalFixture is Test {
         assertEq(token.balanceOf(address(gate)), 0);
         assertEq(imd.allowance(address(gate), address(hook)), 0);
         assertEq(imd.allowance(address(gate), address(intake)), 0);
+    }
+
+    function contains(string memory haystack, string memory needle) internal pure returns (bool) {
+        return countOf(haystack, needle) > 0;
+    }
+
+    function countOf(string memory haystack, string memory needle) internal pure returns (uint256 count) {
+        bytes memory h = bytes(haystack);
+        bytes memory n = bytes(needle);
+        if (n.length == 0 || n.length > h.length) return 0;
+        for (uint256 i; i <= h.length - n.length; ++i) {
+            bool found = true;
+            for (uint256 j; j < n.length; ++j) {
+                if (h[i + j] != n[j]) {
+                    found = false;
+                    break;
+                }
+            }
+            if (found) ++count;
+        }
     }
 }
