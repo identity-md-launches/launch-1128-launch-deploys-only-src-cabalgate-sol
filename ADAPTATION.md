@@ -18,11 +18,11 @@ neither is part of this launch. No transactions were broadcast.
 | `test/OracleSigner.t.sol` | Reproduces the informational ERC-1271 limitation with a registry that accepts the signature while the gate rejects it. Pins the audited ECDSA-only model rather than changing the gate's verification behavior. |
 | `README.md`, `docs/DEPLOYMENT.md`, `docs/ORACLE.md`, `test/README.md` | Documented the flat ABI, supplied arguments, gate-only deployment, existing hook owner's handoff, validity fix, new coverage, and ECDSA signer requirement. Replaced obsolete instructions to launch the token and hook again. |
 
-The gate runtime compiled byte-for-byte identically to the original artifact.
-Its oracle struct, type string, domain, request/callback/execution logic, fees,
-limits, getters and owner configuration behavior are unchanged. The sole
-behavioral adjustment outside the constructor is the reproduced audit fix in
-QuestionBuilder's requested validity.
+The initial constructor adaptation preserved the original gate runtime. This
+review revision adds the submission binding check described below. The oracle
+struct, type string, domain, callback/execution logic, fees, limits, getters and
+owner configuration behavior remain unchanged. The earlier reproduced validity
+fix in QuestionBuilder is retained.
 
 ## Imported audit disposition
 
@@ -46,9 +46,10 @@ QuestionBuilder's requested validity.
 
 3. **`0f53ff5e29f06528143b06d176f30465f381db626858bbf130024e25198f3c74` — deployment size: reproduced and covered.**
    The original artifact has 23,630-byte runtime and 36,645-byte creation code.
-   The adapted gate retains the identical 23,630-byte runtime (946 bytes below
-   EIP-170); creation code is 36,619 bytes, or 37,035 including all thirteen ABI
-   words, below 49,152. The new rehearsal scans CabalGate, QuestionBuilder and
+   The constructor-only adaptation retained that runtime. This revision's
+   necessary submission binding check adds 337 bytes: runtime is now 23,967
+   bytes (609 below EIP-170); creation code is 36,970 bytes, or 37,386 including
+   all thirteen ABI words, below 49,152. The rehearsal scans CabalGate, QuestionBuilder and
    ImpactEstimator, skipping PUSH data, for DELEGATECALL, CALLCODE and SELFDESTRUCT.
 
 4. **`e710a893042eac0489270b56e9bdb1dfb8216395a448a1f29b13aeb0a79128dc` — dependency state: reproduced and covered.**
@@ -75,6 +76,35 @@ QuestionBuilder's requested validity.
    Ownership remains two-step; renunciation freezes configuration. These are
    documented powers, not permission bypasses to remove.
 
+## Review revision
+
+**`0c508e6b061be4b239367a1ad8dbc6becdcaa49dcccffaf4540413867f9f5da2`
+— unbound hook fees: reproduced and fixed.** The supplied proof, copied unchanged
+to `test/scratch/Proof_0c508e6b061b.t.sol`, failed on the starting source with
+`next call did not revert as expected` (594,451 gas). The new regression tests
+also failed for both buys and sells in both currency orderings before the fix.
+
+| Files | Revision and reason |
+| --- | --- |
+| `src/CabalGate.sol` | Added `if (hook.gate() != address(this)) revert InvalidConfig();` at the start of `_submit`, after the existing chain check. Both submission paths now refuse an unbound hook or one bound to a different gate before building a question, querying the Intake or moving funds. This is the only production-code change in this revision. |
+| `test/HookBinding.t.sol` | Added buy and sell regressions using real local CabalHook and PoolManager instances, inherited by the reverse-currency suite. Assert no fee, allowance consumption, Intake request or occupied request slot before handoff or for a different gate. After the correct one-time binding, the same request pays exactly 0.5 IMD and completes approval and execution; a second binding still reverts. |
+| `docs/DEPLOYMENT.md` | Documented the enforced handoff prerequisite and the current Intake/signer/price trust boundary for submitters. |
+| `.imd-responses.json`, `ADAPTATION.md` | Recorded every review finding's disposition and the revision's reproduction, change and validation evidence. |
+
+The constructor still allows deployment before the existing hook owner's
+separate handoff. No constructor binding check was added: submission now prevents
+the fee loss even if that handoff is skipped or a different gate is selected.
+CabalHook and CabalCoin remain unchanged, and neither is a launch target.
+
+**`f63ff0a91b0e35931684c674b90078310ef1ce2ea1068ee755b1f65658953e22`
+— Intake price: confirmed owner trust assumption, preserved.** The scratch
+`IntakePriceTrustTest` configures an Intake quoting ALICE's entire IMD balance;
+her subsequent submission pays that quote in full. The same test confirms ALICE
+cannot call `configure`. This is the existing owner power, not a permission
+bypass. No price cap or configuration restriction is introduced. The operator/UI
+should display the current Intake, signer and price; users should approve only
+the intended request price and, separately, the trade input plus any buy fee.
+
 ## Launch handoff and validation
 
 The manifest is written by the next assignment. The existing `launch.json`
@@ -86,10 +116,13 @@ After deployment the existing hook owner calls `hook.setGate(gate)` once.
 
 Build configuration and vendored dependencies were left intact. Validation uses
 the project's own Foundry profile without network access or environment inputs.
-Final validation: `forge build` passed; `forge test` passed **147 tests in 22
-suites**, with zero failures or skips. This includes the factory/runtime/opcode
-checks, all three isolated latency cases, live signing vectors, fuzz properties,
-and both invariant campaigns (256 runs and 16,384 calls each, zero handler
-reverts). `git diff --check` passed. The final artifact comparison reconfirmed
-the identical gate runtime and the thirteen-word nonpayable constructor ABI.
+Revision validation: `forge build` passed; `forge test` passed **153 tests in 24
+suites**, with zero failures or skips. Of these, 151 tests in 22 suites are
+delivered; the other two are the unchanged supplied proof and the Intake-price
+trust reproduction in scratch. Coverage includes factory/runtime/opcode checks,
+the four new handoff cases, all three isolated latency cases, live signing
+vectors, fuzz properties, and both invariant campaigns (256 runs and 16,384
+calls each, zero handler reverts). `git diff --check` passed. Artifact inspection
+confirmed the size bounds above and the unchanged thirteen-word nonpayable
+constructor ABI. `.imd-responses.json` contains all eight finding responses.
 No Slither, Mythril, live fork, deployment or funded-wallet operation is claimed.

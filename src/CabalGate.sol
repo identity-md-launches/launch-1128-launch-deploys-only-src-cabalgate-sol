@@ -235,6 +235,7 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     function _submit(bool buy, uint256 amount, string calldata reason) private returns (bytes32 id) {
         if (block.chainid != 1) revert WrongChain();
+        if (hook.gate() != address(this)) revert InvalidConfig();
         if (activeRequest[msg.sender] != bytes32(0)) revert ActiveRequest();
         Config memory cfg = _configs[configVersion];
         uint256 maxAmount = buy ? cfg.maxBuyAmount : cfg.maxSellAmount;

@@ -102,6 +102,71 @@ contract HookBindingTest is CabalFixture {
         return PoolKey(Currency.wrap(c0), Currency.wrap(c1), 12500, 60, IHooks(address(hooks)));
     }
 
+    function test_buySubmissionRequiresHookHandoffBeforeCharging() public {
+        _assertSubmissionRequiresHandoff(true);
+    }
+
+    function test_sellSubmissionRequiresHookHandoffBeforeCharging() public {
+        _assertSubmissionRequiresHandoff(false);
+    }
+
+    function _assertSubmissionRequiresHandoff(bool buyRequest) private {
+        hook = _freshHook(400000);
+        key = _sortedKey(address(imd), address(token), hook);
+        manager.initialize(key, Q96);
+        modify(LOWER, UPPER, int256(SEED_LIQUIDITY));
+        gate = deployGate(hook);
+        CabalGate intended = gate;
+        CabalGate second = deployGate(hook);
+        intake.setPrice(0.5 ether);
+        token.transfer(ALICE, 1000 ether);
+        vm.startPrank(ALICE);
+        imd.approve(address(gate), type(uint256).max);
+        token.approve(address(gate), type(uint256).max);
+        imd.approve(address(second), type(uint256).max);
+        token.approve(address(second), type(uint256).max);
+        vm.stopPrank();
+
+        assertTrue(hook.initialized());
+        assertEq(hook.gate(), address(0));
+        _assertSubmissionRefusedWithoutPayment(buyRequest);
+        hook.setGate(address(intended));
+        gate = second;
+        _assertSubmissionRefusedWithoutPayment(buyRequest);
+        vm.expectRevert(CabalHook.InvalidGate.selector);
+        hook.setGate(address(second));
+
+        gate = intended;
+        uint256 beforePayment = imd.balanceOf(ALICE);
+        bytes32 id = submit(buyRequest, 100 ether);
+        assertEq(uint8(gate.getRequest(id).status), uint8(CabalGate.Status.Pending));
+        assertEq(gate.activeRequest(ALICE), id);
+        assertEq(imd.balanceOf(ALICE), beforePayment - 0.5 ether);
+        assertEq(imd.balanceOf(address(intake)), 0.5 ether);
+        approve(id);
+        vm.prank(ALICE);
+        uint256 output = buyRequest ? gate.executeBuyRequest(id) : gate.executeSellRequest(id);
+        assertGt(output, 0);
+        assertEq(uint8(gate.getRequest(id).status), uint8(CabalGate.Status.Executed));
+        assertEq(gate.activeRequest(ALICE), bytes32(0));
+        assertSettled();
+    }
+
+    function _assertSubmissionRefusedWithoutPayment(bool buyRequest) private {
+        uint256 beforePayment = imd.balanceOf(ALICE);
+        uint256 beforeCabal = token.balanceOf(ALICE);
+        uint256 beforeAllowance = imd.allowance(ALICE, address(gate));
+        vm.expectRevert(CabalGate.InvalidConfig.selector);
+        submit(buyRequest, 100 ether);
+        assertEq(imd.balanceOf(ALICE), beforePayment);
+        assertEq(token.balanceOf(ALICE), beforeCabal);
+        assertEq(imd.allowance(ALICE, address(gate)), beforeAllowance);
+        assertEq(gate.activeRequest(ALICE), bytes32(0));
+        assertEq(intake.nonce(), 0);
+        assertEq(imd.balanceOf(address(intake)), 0);
+        assertSettled();
+    }
+
     /// @dev Trust assumption made visible. The hook binds the first pool with the launch parameters whoever
     ///      initializes it, because the manifest cannot name the factory; its safety rests on the factory deploying
     ///      the hook and initializing in one transaction (docs/DEPLOYMENT.md, test/Launch.t.sol). If a hook were
