@@ -54,7 +54,7 @@ contract GateLaunchFactory {
     }
 }
 
-contract GateLaunchTest is Test {
+abstract contract GateLaunchFixture is Test {
     address internal constant HOOK = 0xf41B6Ff942a082C0d320a0C151310ac2A922a0c0;
     address internal constant INTAKE = 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56;
     address internal constant IMD = 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7;
@@ -64,7 +64,7 @@ contract GateLaunchTest is Test {
     address internal hookOwner;
     GateLaunchFactory internal factory;
 
-    function setUp() public {
+    function setUp() public virtual {
         vm.chainId(1);
         launchOwner = makeAddr("launch owner resolves $owner");
         hookOwner = makeAddr("existing hook owner");
@@ -99,7 +99,9 @@ contract GateLaunchTest is Test {
     function _deploy(bytes32 salt) internal returns (CabalGate) {
         return CabalGate(factory.deploy(_creation(_arguments()), salt));
     }
+}
 
+contract GateLaunchTest is GateLaunchFixture {
     function test_factoryDeploysOnlyGateWithAllThirteenManifestWords() public {
         bytes memory arguments = _arguments();
         assertEq(arguments.length, 13 * 32);
