@@ -1,0 +1,30 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "CabalHook",
+    "constructorArgs": [
+      "$poolManager",
+      "0x000000000000000000000000000000000000dead",
+      "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+      "0x000000000000000000000000000000000000dead"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap"
+    ]
+  },
+  "token": {
+    "contract": "CabalCoin",
+    "name": "CabalCoin",
+    "symbol": "CABAL",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "BLOCKING, hook revision required: CabalHook cannot be launched from any manifest. Its constructor is (IPoolManager manager, address initialOwner, IERC20 pair, address factory). beforeInitialize reverts InvalidPool unless PoolManager reports exactly `factory` as the initializer, and the constructor refuses factory 0, so the check cannot be switched off. The manifest schema resolves only $poolManager and $token; neither ever calls PoolManager.initialize, so neither can name the factory (verified locally). The brief and repository name no authorized factory or owner address. Arguments 2 (initialOwner) and 4 (factory) are therefore the 0xdead sentinel, the only form the manifest can express. Consequences: the one-transaction launch (deploy hook, initialize, seed) reverts atomically at initialize, so nothing is left half-launched; and even with a correct factory the sentinel owner could never call the one-time setGate, so beforeSwap would refuse every swap forever. Do not deploy this manifest. Send the hook back for: (1) dropping the factory argument and authenticating initialization only by !initialized, key.hooks == this, fee 12500, tick spacing 60 and IMD in the pair (the one-pool binding already excludes hostile pools); (2) removing the owner-only post-launch setGate dependency, or obtaining an authorized owner from the launch policy, since the schema has no owner placeholder. If authorized concrete factory and owner addresses are supplied instead, the manifest and creation code must be re-reviewed; the mined salt changes with the arguments.\nEthereum mainnet, CABAL/IMD. CabalCoin is a standard ERC-20 with plain transfers, 18 decimals and a no-argument constructor; the hook infers CABAL from the initialized PoolKey, so it takes no $token argument. CabalHook declares exactly beforeInitialize, beforeSwap and afterSwap (flags 8384 / 0x20c0); every callback requires PoolManager. All return-delta permissions are false. Initialization binds one sorted CABAL/IMD pool and accepts fee 12500 and tick spacing 60; the 1.25% LP fee is separate from the hook fee. initialPrice is decimal sqrtPriceX96 = 2^96, a 1:1 ratio of currency1/currency0 minor units matching the local fixture; it is an explicit assumption because no launch price was supplied.\nCabalGate is deployed after pool initialization and bound once by the hook owner. Only the bound gate may swap, exact input only. Factory seeding, liquidity addition/removal and LP fee claims are ungated. Each successful buy or sell pays two independently rounded floor(IMD volume / 400) legs: one to 0x000000000000000000000000000000000000dEaD, one into permanent hook-owned single-sided v4 positions outside the current price; compound reinvests fees without principal withdrawal. Buys pay the hook fee in addition to input; sells deduct it from IMD output. The gate prefunds settlement and calls finishSwap inside its unlock; callbacks never take fees from unsettled manager balances.\nCabalGate exposes submitBuyRequest, submitSellRequest, executeBuyRequest and executeSellRequest. Submission pulls exactly Intake.priceOf(action, IMD), approves it, calls request with the callback and clears the approval. Defaults: Intake 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56, action oracle.request@oracle-1, signer 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982. Reasons are UTF-8 validated, JSON-escaped and capped at 280 characters, questions at 2000, definitions at 512; panel 30/20, bool, 900 seconds, one-hour window. Only the request's Intake may deliver a pending EIP-712 result; the callback verifies and stores only, and true permits requester-only single-use execution for at most 300 seconds. Execution needs a nonzero user minimum output; clearRequest releases unanswered requests after one hour without refunding oracle cost. Owner configuration covers Intake, action, IMD (before binding only), signer, window and limits; changes invalidate old approvals.\nNotes do not authorize deployment or set launch policy."
+}
