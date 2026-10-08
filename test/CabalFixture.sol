@@ -58,17 +58,33 @@ abstract contract CabalFixture is Test {
         vm.warp(1_800_000_000);
         vm.roll(12345);
         manager = IPoolManager(address(new PoolManager(address(this))));
-        token = new CabalCoin();
         address pairAddress = imd0 ? address(0x1000) : address(type(uint160).max - 1);
         deployCodeTo("MockERC20.sol:MockERC20", abi.encode("IdentityMD", "IMD", 0), pairAddress);
         imd = MockERC20(pairAddress);
         imd.mint(address(this), 100_000_000 ether);
         imd.mint(ALICE, 1_000_000 ether);
         imd.mint(BOB, 1_000_000 ether);
-        bytes memory creation =
-            abi.encodePacked(type(CabalHook).creationCode, abi.encode(manager, address(this), imd, address(this)));
+        _launch(imd0, oneSided ? TickMath.getSqrtPriceAtTick(imd0 ? UPPER : LOWER) : Q96);
+        modify(LOWER, UPPER, int256(SEED_LIQUIDITY));
+        intake = new MockIntake();
+        gate = new CabalGate(hook, address(this), defaultConfig());
+        vm.prank(hook.owner());
+        hook.setGate(address(gate));
+        vm.startPrank(ALICE);
+        imd.approve(address(gate), type(uint256).max);
+        token.approve(address(gate), type(uint256).max);
+        vm.stopPrank();
+        vm.prank(BOB);
+        imd.approve(address(gate), type(uint256).max);
+    }
+
+    /// @dev Deploys the token and the hook (with this contract as explicit owner) and initializes the pool.
+    ///      The launch rehearsal overrides this with a factory that does all three in one call.
+    function _launch(bool imd0, uint160 price) internal virtual {
+        token = new CabalCoin();
+        bytes memory creation = abi.encodePacked(type(CabalHook).creationCode, abi.encode(manager, address(this), imd));
         (bytes32 salt, address predicted) = HookSaltMiner.find(address(this), keccak256(creation), 0, 200000);
-        hook = new CabalHook{salt: salt}(manager, address(this), imd, address(this));
+        hook = new CabalHook{salt: salt}(manager, address(this), imd);
         assertEq(address(hook), predicted);
         key = PoolKey(
             Currency.wrap(imd0 ? address(imd) : address(token)),
@@ -77,18 +93,7 @@ abstract contract CabalFixture is Test {
             60,
             IHooks(address(hook))
         );
-        uint160 price = oneSided ? TickMath.getSqrtPriceAtTick(imd0 ? UPPER : LOWER) : Q96;
         manager.initialize(key, price);
-        modify(LOWER, UPPER, int256(SEED_LIQUIDITY));
-        intake = new MockIntake();
-        gate = new CabalGate(hook, address(this), defaultConfig());
-        hook.setGate(address(gate));
-        vm.startPrank(ALICE);
-        imd.approve(address(gate), type(uint256).max);
-        token.approve(address(gate), type(uint256).max);
-        vm.stopPrank();
-        vm.prank(BOB);
-        imd.approve(address(gate), type(uint256).max);
     }
 
     /// @dev oracleVerifier left zero: the gate substitutes itself, as a deployer who cannot predict its address would.

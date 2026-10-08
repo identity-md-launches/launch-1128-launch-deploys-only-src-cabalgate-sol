@@ -44,7 +44,11 @@ contract CabalHook is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     address public constant DEAD = 0x000000000000000000000000000000000000dEaD;
     uint256 private constant Q96 = 1 << 96;
     IPoolManager public immutable poolManager;
-    address public immutable launchFactory;
+    /// @notice The account that originated the transaction deploying this hook: the launch's initial owner
+    ///         whenever the constructor was not given an explicit one.
+    address public immutable launcher;
+    /// @notice Whoever initialized the bound pool (the launch factory), recorded for reference only.
+    address public initializer;
     IERC20 public imd;
     address public cabal;
     address public gate;
@@ -62,14 +66,22 @@ contract CabalHook is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event FeePaid(uint256 imdVolume, uint256 burned, uint256 pol);
     event ProtocolLiquidityAdded(int24 lower, int24 upper, uint128 liquidity, address currency, uint256 budget);
 
-    constructor(IPoolManager manager, address initialOwner, IERC20 pair, address factory) Ownable(initialOwner) {
-        if (address(manager) == address(0) || address(pair) == address(0) || factory == address(0)) {
-            revert InvalidPool();
-        }
+    /// @param initialOwner The hook owner, who binds the gate once. The launch manifest can only resolve the
+    ///        PoolManager and the token, so `address(0)` or `0xdead` means "unspecified": ownership then goes to the
+    ///        externally owned account that originated the launch transaction (`tx.origin`, read once here and
+    ///        never used to authorize a later call), which must hand it over with the two-step transfer.
+    ///        Binding stays owner-only because a permissionless first-come binding could be back-run in the
+    ///        launch block by a hostile gate, and the binding is permanent.
+    constructor(IPoolManager manager, address initialOwner, IERC20 pair) Ownable(_launchOwner(initialOwner)) {
+        if (address(manager) == address(0) || address(pair) == address(0)) revert InvalidPool();
         poolManager = manager;
-        launchFactory = factory;
+        launcher = tx.origin;
         imd = pair;
         Hooks.validateHookPermissions(IHooks(address(this)), getHookPermissions());
+    }
+
+    function _launchOwner(address initialOwner) private view returns (address) {
+        return initialOwner == address(0) || initialOwner == DEAD ? tx.origin : initialOwner;
     }
 
     modifier onlyManager() {
@@ -108,15 +120,19 @@ contract CabalHook is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         emit GateBound(candidate);
     }
 
+    /// @dev Binds the first pool with the launch parameters, whoever initializes it. The factory deploys this hook
+    ///      and initializes in the same transaction, so nobody else can reach the hook first; an explicit factory
+    ///      address could not be expressed by the launch manifest. Any later pool is refused.
     function beforeInitialize(address sender, PoolKey calldata key, uint160) external onlyManager returns (bytes4) {
         address c0 = Currency.unwrap(key.currency0);
         address c1 = Currency.unwrap(key.currency1);
         if (
-            initialized || sender != launchFactory || address(key.hooks) != address(this) || key.fee != 12_500
-                || key.tickSpacing != 60 || c0 == address(0) || c0 >= c1 || (c0 != address(imd) && c1 != address(imd))
+            initialized || address(key.hooks) != address(this) || key.fee != 12_500 || key.tickSpacing != 60
+                || c0 == address(0) || c0 >= c1 || (c0 != address(imd) && c1 != address(imd))
         ) revert InvalidPool();
         cabal = c0 == address(imd) ? c1 : c0;
         _key = key;
+        initializer = sender;
         initialized = true;
         emit PoolBound(PoolId.unwrap(key.toId()), cabal);
         return IHooks.beforeInitialize.selector;

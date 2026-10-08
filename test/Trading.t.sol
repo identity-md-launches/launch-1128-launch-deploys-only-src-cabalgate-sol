@@ -17,16 +17,21 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 
 contract TradingTest is CabalFixture {
     using StateLibrary for IPoolManager;
     using PoolIdLibrary for PoolKey;
 
-    function test_initializationFactoryPairFeeAndImmutablePairAfterBinding() public {
-        bytes memory creation =
-            abi.encodePacked(type(CabalHook).creationCode, abi.encode(manager, address(this), imd, BOB));
-        (bytes32 salt,) = HookSaltMiner.find(address(this), keccak256(creation), 0, 200000);
-        CabalHook fresh = new CabalHook{salt: salt}(manager, address(this), imd, BOB);
+    /// @dev Initialization is authenticated by the pool parameters and the one-pool binding, not by who calls:
+    ///      the launch manifest cannot name the factory, and the factory initializes in the hook's own deployment
+    ///      transaction, so nobody else can reach a fresh hook first.
+    function test_initializationOnceByAnySenderWithLaunchParametersAndImmutablePairAfterBinding() public {
+        bytes memory creation = abi.encodePacked(type(CabalHook).creationCode, abi.encode(manager, address(this), imd));
+        // Same deployer and arguments as the fixture's hook: search past its salt range for a distinct address.
+        (bytes32 salt,) = HookSaltMiner.find(address(this), keccak256(creation), 200000, 200000);
+        CabalHook fresh = new CabalHook{salt: salt}(manager, address(this), imd);
+        assertEq(fresh.owner(), address(this));
         vm.prank(ALICE);
         vm.expectRevert();
         fresh.setIMD(IERC20(address(token)));
@@ -35,21 +40,29 @@ contract TradingTest is CabalFixture {
         fresh.setIMD(imd);
         PoolKey memory newKey = key;
         newKey.hooks = IHooks(address(fresh));
-        vm.expectRevert();
-        manager.initialize(newKey, Q96);
         newKey.fee = 3000;
-        vm.prank(BOB);
         vm.expectRevert();
         manager.initialize(newKey, Q96);
         newKey.fee = 12500;
         newKey.tickSpacing = 10;
-        vm.prank(BOB);
         vm.expectRevert();
         manager.initialize(newKey, Q96);
         newKey.tickSpacing = 60;
+        MockERC20 other = new MockERC20("Other", "OTH", 0);
+        PoolKey memory withoutImd = _sortedKey(address(token), address(other), fresh);
+        vm.expectRevert();
+        manager.initialize(withoutImd, Q96);
         vm.prank(BOB);
         manager.initialize(newKey, Q96);
+        assertTrue(fresh.initialized());
+        assertEq(fresh.initializer(), BOB);
         assertEq(fresh.cabal(), address(token));
+        // One pool only: a second IMD pool through the same hook is refused, as is re-initializing the first.
+        PoolKey memory second = _sortedKey(address(imd), address(other), fresh);
+        vm.expectRevert();
+        manager.initialize(second, Q96);
+        vm.expectRevert();
+        manager.initialize(newKey, Q96);
         vm.expectRevert(CabalHook.InvalidPool.selector);
         fresh.setIMD(IERC20(address(token)));
         vm.prank(ALICE);
@@ -57,6 +70,11 @@ contract TradingTest is CabalFixture {
         fresh.setGate(address(gate));
         vm.expectRevert(CabalHook.InvalidGate.selector);
         fresh.setGate(address(gate));
+    }
+
+    function _sortedKey(address a, address b, CabalHook hooks) internal pure returns (PoolKey memory) {
+        (address c0, address c1) = a < b ? (a, b) : (b, a);
+        return PoolKey(Currency.wrap(c0), Currency.wrap(c1), 12500, 60, IHooks(address(hooks)));
     }
 
     function test_transferThatReturnsSuccessWithoutPaymentRejected() public {
