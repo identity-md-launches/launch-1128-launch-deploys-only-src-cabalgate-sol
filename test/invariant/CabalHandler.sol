@@ -138,8 +138,23 @@ contract CabalHandler is CabalFixture {
         vm.prank(other);
         vm.expectRevert(CabalGate.NotRequester.selector);
         gate.executeBuyRequest(id);
-        if (!_executable(id)) return;
         CabalGate.Request memory r = gate.getRequest(id);
+        if (
+            expectedStatus[id] == CabalGate.Status.Approved && r.version == gate.configVersion()
+                && block.timestamp < r.approvedUntil
+        ) {
+            (uint160 current,,,) = manager.getSlot0(key.toId());
+            if (gate.priceMovement(r.sqrtPriceX96, current) > gate.configurationAt(r.version).maxDriftBps) {
+                bytes32 driftedState = _economicState(user, id);
+                vm.prank(user);
+                vm.expectRevert(CabalGate.LimitExceeded.selector);
+                if (r.buy) gate.executeBuyRequest(id, 1);
+                else gate.executeSellRequest(id, 1);
+                assertEq(_economicState(user, id), driftedState, "refused drifted execution changed accounting");
+                ++failedExecutions;
+            }
+        }
+        if (!_executable(id)) return;
         vm.prank(user);
         gate.setSlippageLimit(id, type(uint256).max);
         bytes32 beforeState = _economicState(user, id);
@@ -286,7 +301,11 @@ contract CabalHandler is CabalFixture {
     function _executable(bytes32 id) private view returns (bool) {
         if (id == 0 || expectedStatus[id] != CabalGate.Status.Approved) return false;
         CabalGate.Request memory r = gate.getRequest(id);
-        return r.version == gate.configVersion() && block.timestamp < r.approvedUntil
+        // Other actors' trades move the price between submission and execution; past the drift cap the gate
+        // refuses, which rejectBadExecution asserts explicitly, so a silent skip here is not a hidden revert.
+        (uint160 current,,,) = manager.getSlot0(key.toId());
+        bool drifted = gate.priceMovement(r.sqrtPriceX96, current) > gate.configurationAt(r.version).maxDriftBps;
+        return r.version == gate.configVersion() && block.timestamp < r.approvedUntil && !drifted
             && (r.buy || token.balanceOf(r.requester) >= r.amount);
     }
 
