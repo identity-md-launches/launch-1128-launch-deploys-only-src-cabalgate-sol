@@ -10,6 +10,38 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract GateFactoryEdgesTest is GateLaunchFixture {
+    function _wordsWith(
+        uint128 buy,
+        uint128 sell,
+        uint16 impact,
+        uint16 drift,
+        uint16 panel,
+        uint16 quorum,
+        uint8 hours_
+    ) private view returns (bytes memory) {
+        return abi.encode(
+            HOOK,
+            POOL_MANAGER,
+            CABAL,
+            CABAL,
+            IMD,
+            FEE,
+            TICK_SPACING,
+            launchOwner,
+            INTAKE,
+            IMD,
+            SIGNER,
+            ACTION,
+            buy,
+            sell,
+            impact,
+            drift,
+            panel,
+            quorum,
+            hours_
+        );
+    }
+
     /// forge-config: default.fuzz.runs = 256
     function testFuzz_flatWordsPreserveValidConfiguration(
         uint128 buy,
@@ -27,15 +59,7 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         panel = uint16(bound(panel, 2, 300));
         quorum = uint16(bound(quorum, 2, panel));
         hours_ = uint8(bound(hours_, 1, 24));
-        bytes memory args =
-            abi.encode(HOOK, launchOwner, INTAKE, IMD, SIGNER, ACTION, buy, sell, impact, drift, panel, quorum, hours_);
-        CabalGate gate = CabalGate(factory.deploy(_creation(args), keccak256(args)));
-        CabalGate.Config memory expected = CabalGate.Config(
-            INTAKE, IMD, SIGNER, address(gate), ACTION, buy, sell, impact, drift, panel, quorum, hours_, 0
-        );
-        assertEq(abi.encode(gate.configuration()), abi.encode(expected));
-        assertEq(gate.owner(), launchOwner);
-        assertEq(gate.configVersion(), 1);
+        _checkEdges(buy, sell, impact, drift, panel, quorum, hours_);
     }
 
     function test_pinnedValidNumericEdges() public {
@@ -52,21 +76,21 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         uint16 quorum,
         uint8 hours_
     ) private {
-        bytes memory args = abi.encode(
-            HOOK, launchOwner, INTAKE, IMD, SIGNER, ACTION, buy, sell, impact, drift, panel, quorum, hours_
-        );
+        bytes memory args = _wordsWith(buy, sell, impact, drift, panel, quorum, hours_);
         CabalGate gate = CabalGate(factory.deploy(_creation(args), keccak256(args)));
         CabalGate.Config memory expected = CabalGate.Config(
             INTAKE, IMD, SIGNER, address(gate), ACTION, buy, sell, impact, drift, panel, quorum, hours_, 0
         );
         assertEq(abi.encode(gate.configuration()), abi.encode(expected));
+        assertEq(gate.owner(), launchOwner);
+        assertEq(gate.configVersion(), 1);
     }
 
     function test_constructorRejectsDirtyHighBitsInEveryNarrowWord() public {
         // A static-word factory must not silently truncate an address or an integer.
-        for (uint256 index; index < 13; ++index) {
-            if (index == 5) continue; // bytes32 action uses all 256 bits.
-            uint256 width = index < 5 ? 160 : index < 8 ? 128 : index < 12 ? 16 : 8;
+        for (uint256 index; index < 19; ++index) {
+            if (index == 11) continue; // bytes32 action uses all 256 bits.
+            uint256 width = index < 5 ? 160 : index < 7 ? 24 : index < 11 ? 160 : index < 14 ? 128 : index < 18 ? 16 : 8;
             bytes memory args = _arguments();
             assembly ("memory-safe") {
                 let word := add(add(args, 32), mul(index, 32))
@@ -79,9 +103,11 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
     }
 
     function test_constructorRejectsTruncatedStaticArguments() public {
-        for (uint256 words; words < 13; ++words) {
+        for (uint256 words; words < 19; ++words) {
             bytes memory args = _arguments();
-            assembly ("memory-safe") { mstore(args, mul(words, 32)) }
+            assembly ("memory-safe") {
+                mstore(args, mul(words, 32))
+            }
             bytes memory creation = _creation(args);
             vm.expectRevert("application constructor failed");
             factory.deploy(creation, bytes32(words));
@@ -113,16 +139,18 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         assertEq(MockLaunchHook(HOOK).gate(), address(0));
     }
 
-    function test_failedConfigurationRollsBackHelpersAndSameDeploymentCanRetry() public {
-        bytes memory creation = _creation(_arguments());
-        bytes32 salt = keccak256("retry failed gate constructor");
+    function test_failedConfigurationRollsBackHelpersAndTheAddressStaysFree() public {
+        // _configure runs after both helpers are created. A late validation failure must roll back the entire
+        // deployment, including those child contracts, and leave nothing behind at the predicted address.
+        bytes memory bad = _arguments();
+        assembly ("memory-safe") {
+            mstore(add(bad, 576), 0) // quorum
+        }
+        bytes memory creation = _creation(bad);
+        bytes32 salt = keccak256("failed gate constructor");
         address predicted = vm.computeCreate2Address(salt, keccak256(creation), address(factory));
         address builder = vm.computeCreateAddress(predicted, 1);
         address estimator = vm.computeCreateAddress(predicted, 2);
-
-        // _configure runs after both helpers are created. A late dependency mismatch
-        // must roll back the entire deployment, including those child contracts.
-        vm.mockCall(HOOK, abi.encodeWithSelector(MockLaunchHook(HOOK).imd.selector), abi.encode(INTAKE));
         vm.expectRevert("application constructor failed");
         factory.deploy(creation, salt);
         assertEq(predicted.code.length, 0);
@@ -131,21 +159,16 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         assertEq(vm.getNonce(predicted), 0);
         assertEq(MockLaunchHook(HOOK).gate(), address(0));
 
-        vm.clearMockedCalls();
-        CabalGate gate = CabalGate(factory.deploy(creation, salt));
-        assertEq(address(gate), predicted);
-        assertEq(address(gate.questionBuilder()), builder);
-        assertEq(address(gate.estimator()), estimator);
-        assertGt(builder.code.length, 0);
-        assertGt(estimator.code.length, 0);
+        CabalGate gate = _deploy(salt);
+        assertEq(address(gate.questionBuilder()), vm.computeCreateAddress(address(gate), 1));
+        assertEq(address(gate.estimator()), vm.computeCreateAddress(address(gate), 2));
         assertEq(gate.owner(), launchOwner);
         assertEq(gate.configVersion(), 1);
-        assertEq(gate.configuration().oracleVerifier, predicted);
+        assertEq(gate.configuration().oracleVerifier, address(gate));
         assertEq(gate.configuration().boolAnswerType, 0);
-        assertEq(MockLaunchHook(HOOK).gate(), address(0));
         vm.prank(hookOwner);
         MockLaunchHook(HOOK).setGate(address(gate));
-        assertEq(MockLaunchHook(HOOK).gate(), predicted);
+        assertEq(MockLaunchHook(HOOK).gate(), address(gate));
     }
 
     function test_hookRejectsMissingCodeWrongHookWrongCabalAndDuplicateBinding() public {

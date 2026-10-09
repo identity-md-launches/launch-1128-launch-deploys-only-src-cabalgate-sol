@@ -2,13 +2,19 @@
 
 Target: Ethereum mainnet, chain ID 1, Cancun. The factory deploys **only `src/CabalGate.sol:CabalGate`**. Its nonpayable constructor creates QuestionBuilder and ImpactEstimator. CabalHook, CabalCoin, the pool and its liquidity already exist; do not deploy or initialize them again.
 
-The old `launch.json` describes the earlier token/hook launch and is not suitable for this launch. This implementation assignment leaves manifest writing to the separate manifest step, which must replace it with an `evm_contracts` manifest containing only CabalGate.
+The manifest (`launch.json`) is written by the separate manifest step after this work is accepted; this tree carries none. The earlier manifest, which listed the thirteen-word constructor that parked launch 990, was removed.
 
-The flat constructor takes these arguments in order. `$owner` is resolved by the launch system; it is not the factory and no wallet is supplied by this adaptation.
+The launch checks deploy the gate in an empty EVM with no chain state, so the constructor makes **no external calls and no code-length checks**: everything it needs arrives as a flat static word. `$owner` is resolved by the launch system; it is not the factory and no wallet is supplied by this adaptation. The pool words below are the live hook's values read on 2026-10-08.
 
 | Argument | Type | Manifest value |
 | --- | --- | --- |
 | hook | address | `0xf41b6ff942a082c0d320a0c151310ac2a922a0c0` |
+| poolManager | address | `0x000000000004444c5dc75cb358380d2e3de08a90` |
+| cabal | address | `0x450e5910decee15c3ac056e3ed66cb5ea3dd33be` |
+| currency0 | address | `0x450e5910decee15c3ac056e3ed66cb5ea3dd33be` |
+| currency1 | address | `0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7` |
+| fee | uint24 | `12500` |
+| tickSpacing | uint24 | `60` |
 | initialOwner | address | `$owner` |
 | intake | address | `0x1397434cd35e8a9c8ac312a61d3a285eb31dea56` |
 | imd | address | `0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7` |
@@ -22,13 +28,13 @@ The flat constructor takes these arguments in order. `$owner` is resolved by the
 | quorum | uint16 | `20` |
 | windowHours | uint8 | `1` |
 
-The constructor builds Config with `oracleVerifier = address(this)` and `boolAnswerType = 0`. It uses the existing validation and reads initialized(), poolManager(), cabal(), poolKey() and imd() from the hook. Intake and IMD must have code. The gate creates both helpers and is fully configured without initialization calls. The hook retains its own owner, independently of the gate's `$owner`.
+The constructor stores hook, poolManager and cabal as immutables (the `hook()` and `cabal()` getters are what `hook.setGate` checks), builds the PoolKey from currency0, currency1, fee, tickSpacing and `hooks = hook` (tickSpacing is an unsigned word because the launch ABI has no signed integers; it is narrowed to int24), creates QuestionBuilder and ImpactEstimator, and builds Config with `oracleVerifier = address(this)` and `boolAnswerType = 0`. It validates only what needs no chain state: non-zero addresses, `currency0 < currency1`, cabal is one of the two currencies and imd the other, tickSpacing in 1..2^23-1, and the numeric limits. The gate is fully configured without initialization calls. The hook retains its own owner, independently of the gate's `$owner`.
 
-After deployment, the **existing hook owner** calls `hook.setGate(gate)` once. Check `gate.hook()` equals the hook and `gate.cabal()` equals the hook's CABAL first. The supplied audit recorded CABAL as `0x450e5910DEcEe15c3AC056E3ed66Cb5ea3Dd33BE` and the hook owner as `0xFc3C962FAD2C1cC77f1a0d46e7B8a2De79A21774`; these are historical audit observations, not a fresh on-chain verification. The hook must still be unbound. Once bound it rejects a second gate. This owner call is the requested existing-hook handoff, not a gate initializer or a call performed by the factory.
+After deployment, the **existing hook owner** (`0xFc3C962FAD2C1cC77f1a0d46e7B8a2De79A21774`, the owner of launch 953's hook) calls `hook.setGate(gate)` once. `setGate` compares only `gate.hook()` and `gate.cabal()`, never the pool key, and the binding is permanent; so before that call also recompute `keccak256(abi.encode(hook.poolKey()))` and compare it with the key built from the words above (`(0x450e…33be, 0xd34a…63b7, 12500, 60, hook)`), and confirm `hook.imd()` is the IMD word. A gate bound with a wrong key could never submit and could never be replaced. The hook must still be unbound (`hook.gate() == 0`). This owner call is the requested existing-hook handoff, not a gate initializer or a call performed by the factory.
 
-Both buy and sell submissions revert with `InvalidConfig` until `hook.gate()` equals this gate. This check runs before any oracle payment or request creation, including when the hook has permanently selected a different gate. Enable submissions only after confirming the binding.
+Both buy and sell submissions revert with `InvalidConfig` until the hook reports this gate (`hook.gate()`), this CABAL (`hook.cabal()`), this IMD (`hook.imd()`) and exactly the stored pool key (`keccak256(abi.encode(hook.poolKey()))`). These checks run before any oracle payment or request creation, including when the hook has permanently selected a different gate. Enable submissions only after confirming the binding. The owner's later `configure` runs on the live chain and keeps the checks the constructor cannot make: Intake and IMD must have code and IMD must equal `hook.imd()`.
 
-`test/GateLaunch.t.sol` rehearses the exact static arguments with mocked code at the supplied dependency addresses, CREATE2 deployment, explicit gate ownership, both helper deployments, constructor validation, and one-time hook binding. The existing integration tests continue to exercise the real hook and PoolManager locally. Local tests do not establish today's live pool state. No transactions are broadcast by this assignment.
+`test/GateLaunch.t.sol` rehearses the exact static words twice: first in an EVM where the hook, PoolManager, Intake, IMD and CABAL addresses have no code (what the launch checks do), then against a mock hook at the live address that reports initialized, poolKey, poolManager, imd, cabal and gate like the live one, covering the one-time owner binding, a request that succeeds once the gate is bound, and requests refused when any of those reads mismatch. The existing integration tests continue to exercise the real hook and PoolManager locally. Local tests do not establish today's live pool state. No transactions are broadcast by this assignment.
 
 The initial amount ceilings are 1,000,000 IMD and 10,000,000 CABAL assuming their supplied 18-decimal units. They remain subject to the separate 300 bps impact and 500 bps drift limits. The imported audit reported much smaller effective trades in the seed state; see [ADAPTATION.md](../ADAPTATION.md) for the finding dispositions and owner trust assumptions. The configured signer is an ECDSA key, not an ERC-1271 registry. Configuration updates invalidate existing executions and do not refund oracle charges.
 

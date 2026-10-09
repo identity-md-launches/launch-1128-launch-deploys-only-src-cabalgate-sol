@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {CabalFixture} from "./CabalFixture.sol";
 import {CabalGate} from "src/CabalGate.sol";
 import {IIntake, Attestation} from "src/interfaces/IIntake.sol";
+import {MainnetDefaults} from "src/libraries/MainnetDefaults.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
@@ -207,7 +208,7 @@ contract AdversarialOracleTest is CabalFixture {
     }
 
     function test_configurationRejectsEveryInvalidBoundaryWithoutAdvancingVersion() public {
-        for (uint256 field; field < 19; ++field) {
+        for (uint256 field; field < 22; ++field) {
             CabalGate.Config memory cfg = gate.configuration();
             if (field == 0) cfg.intake = address(0);
             if (field == 1) cfg.intake = ALICE;
@@ -228,6 +229,10 @@ contract AdversarialOracleTest is CabalFixture {
             if (field == 16) cfg.quorum = cfg.panelSize + 1;
             if (field == 17) (cfg.panelSize, cfg.quorum) = (1001, 1);
             if (field == 18) cfg.imd = address(0);
+            // The oracle refuses panelSize or quorum outside 2..300: such a request is paid and never answered.
+            if (field == 19) cfg.quorum = 1;
+            if (field == 20) (cfg.panelSize, cfg.quorum) = (301, 300);
+            if (field == 21) (cfg.panelSize, cfg.quorum) = (1, 1);
             vm.expectRevert(CabalGate.InvalidConfig.selector);
             gate.configure(cfg);
             assertEq(gate.configVersion(), 1);
@@ -235,9 +240,12 @@ contract AdversarialOracleTest is CabalFixture {
         // The largest values the gate accepts are valid, and every accepted update is a new version.
         CabalGate.Config memory edge = gate.configuration();
         (edge.maxImpactBps, edge.maxDriftBps, edge.panelSize, edge.quorum, edge.windowHours) =
-        (5000, 5000, 1000, 1000, 24);
+        (5000, 5000, 300, 300, 24);
         gate.configure(edge);
         assertEq(gate.configVersion(), 2);
+        (edge.panelSize, edge.quorum) = (2, 2);
+        gate.configure(edge);
+        assertEq(gate.configVersion(), 3);
     }
 
     /// @dev A zero verifier is not a misconfiguration: the gate substitutes itself and declares that in the body.
@@ -314,21 +322,16 @@ contract AdversarialOracleTest is CabalFixture {
         assertEq(uint8(gate.getRequest(second).status), uint8(CabalGate.Status.Pending));
     }
 
+    /// @dev The unused `mainnetConfig` view was removed to keep the gate under EIP-170; the defaults it echoed
+    ///      live in MainnetDefaults and the launch words (test/GateLaunch.t.sol), checked here against the brief.
     function test_mainnetDefaultsMatchAssignment() public view {
-        CabalGate.Config memory cfg = gate.mainnetConfig(100, 200, 50, 75);
-        assertEq(cfg.intake, 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56);
-        assertEq(cfg.imd, 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7);
-        assertEq(cfg.signer, 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982);
-        assertEq(cfg.oracleVerifier, address(gate));
-        assertEq(cfg.action, bytes32("oracle.request@oracle-1"));
-        assertEq(cfg.windowHours, 1);
-        assertEq(cfg.panelSize, 30);
-        assertEq(cfg.quorum, 20);
-        assertEq(cfg.boolAnswerType, 0);
-        assertEq(cfg.maxBuyAmount, 100);
-        assertEq(cfg.maxSellAmount, 200);
-        assertEq(cfg.maxImpactBps, 50);
-        assertEq(cfg.maxDriftBps, 75);
+        assertEq(MainnetDefaults.INTAKE, 0x1397434cd35e8a9C8aC312A61D3A285EB31dea56);
+        assertEq(MainnetDefaults.IMD, 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7);
+        assertEq(MainnetDefaults.SIGNER, 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982);
+        assertEq(MainnetDefaults.ACTION, bytes32("oracle.request@oracle-1"));
+        assertEq(MainnetDefaults.ACTION, 0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000);
         assertEq(gate.IDENTITY_NFT(), address(bytes20(hex"0000ec93127baa929e58e97dd0095a2bfb38ec1d")));
+        assertEq(gate.configuration().oracleVerifier, address(gate));
+        assertEq(gate.configuration().boolAnswerType, 0);
     }
 }

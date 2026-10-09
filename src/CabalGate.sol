@@ -8,6 +8,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
@@ -105,6 +106,8 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     QuestionBuilder public immutable questionBuilder;
     ImpactEstimator public immutable estimator;
     PoolKey private _key;
+    /// @dev keccak256(abi.encode(_key)): what hook.poolKey() must return, checked at every submission.
+    bytes32 private immutable _keyHash;
     mapping(bytes32 => Request) private _requests;
     mapping(address => bytes32) public activeRequest;
     mapping(address => Holding) public holdings;
@@ -124,8 +127,18 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     event RequestCleared(bytes32 indexed id);
     event RequestExecuted(bytes32 indexed id, uint256 input, uint256 output, uint256 fee);
 
+    /// @dev Launch constructor: flat static words only, no external calls and no code-length checks, because the
+    ///      launch factory rehearses deployment in an EVM where the hook, PoolManager, Intake and IMD have no code.
+    ///      The hook's own view of the pool (gate, CABAL, IMD, poolKey) is checked at every submission instead.
+    ///      `tickSpacing` is an unsigned word because the launch ABI has no signed integers; it is narrowed to int24.
     constructor(
         CabalHook launchHook,
+        IPoolManager manager,
+        address cabalToken,
+        address currency0,
+        address currency1,
+        uint24 fee,
+        uint24 tickSpacing,
         address initialOwner,
         address intake,
         address imd,
@@ -139,13 +152,22 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         uint16 quorum,
         uint8 windowHours
     ) Ownable(initialOwner) {
-        if (!launchHook.initialized()) revert InvalidConfig();
+        if (
+            address(launchHook) == address(0) || address(manager) == address(0) || cabalToken == address(0)
+                || currency0 == address(0) || currency0 >= currency1
+                || (cabalToken != currency0 && cabalToken != currency1)
+                || imd != (cabalToken == currency0 ? currency1 : currency0) || tickSpacing == 0
+                || tickSpacing > uint24(type(int24).max)
+        ) revert InvalidConfig();
         hook = launchHook;
-        poolManager = launchHook.poolManager();
-        cabal = IERC20(launchHook.cabal());
-        _key = launchHook.poolKey();
+        poolManager = manager;
+        cabal = IERC20(cabalToken);
+        _key = PoolKey(
+            Currency.wrap(currency0), Currency.wrap(currency1), fee, int24(tickSpacing), IHooks(address(launchHook))
+        );
+        _keyHash = keccak256(abi.encode(_key));
         questionBuilder = new QuestionBuilder();
-        estimator = new ImpactEstimator(poolManager, _key);
+        estimator = new ImpactEstimator(manager, _key);
         _configure(
             Config({
                 intake: intake,
@@ -162,29 +184,6 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
                 windowHours: windowHours,
                 boolAnswerType: 0
             })
-        );
-    }
-
-    /// @notice Default mainnet configuration: this gate is the attestation's verifying contract.
-    function mainnetConfig(uint128 maxBuy, uint128 maxSell, uint16 impact, uint16 drift)
-        external
-        view
-        returns (Config memory)
-    {
-        return Config(
-            MainnetDefaults.INTAKE,
-            MainnetDefaults.IMD,
-            MainnetDefaults.SIGNER,
-            address(this),
-            MainnetDefaults.ACTION,
-            maxBuy,
-            maxSell,
-            impact,
-            drift,
-            30,
-            20,
-            1,
-            0
         );
     }
 
@@ -207,19 +206,23 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     /// @dev Configuration changes invalidate execution of old approvals. Oracle identities remain snapshotted.
     /// A pool's currency cannot be changed after initialization; a new IMD asset requires a new pool and gate.
+    /// Runs on the live chain, so it keeps the checks that read other contracts; the constructor cannot make them.
     function configure(Config calldata cfg) external onlyOwner nonReentrant {
+        if (cfg.intake.code.length == 0 || cfg.imd != address(hook.imd()) || cfg.imd.code.length == 0) {
+            revert InvalidConfig();
+        }
         _configure(cfg);
     }
 
+    /// @dev Validation that needs no chain state. The oracle accepts panelSize and quorum only in 2..300.
     function _configure(Config memory cfg) private {
         if (cfg.oracleVerifier == address(0)) cfg.oracleVerifier = address(this);
         if (
-            cfg.intake.code.length == 0 || cfg.imd != address(hook.imd()) || cfg.imd.code.length == 0
-                || cfg.signer == address(0) || cfg.action == bytes32(0) || cfg.maxBuyAmount == 0
-                || cfg.maxSellAmount == 0 || cfg.maxBuyAmount > uint128(type(int128).max)
+            cfg.intake == address(0) || cfg.imd == address(0) || cfg.signer == address(0) || cfg.action == bytes32(0)
+                || cfg.maxBuyAmount == 0 || cfg.maxSellAmount == 0 || cfg.maxBuyAmount > uint128(type(int128).max)
                 || cfg.maxSellAmount > uint128(type(int128).max) || cfg.maxImpactBps == 0 || cfg.maxImpactBps > 5000
-                || cfg.maxDriftBps < cfg.maxImpactBps || cfg.maxDriftBps > 5000 || cfg.quorum == 0
-                || cfg.quorum > cfg.panelSize || cfg.panelSize > 1000 || cfg.windowHours == 0 || cfg.windowHours > 24
+                || cfg.maxDriftBps < cfg.maxImpactBps || cfg.maxDriftBps > 5000 || cfg.quorum < 2
+                || cfg.quorum > cfg.panelSize || cfg.panelSize > 300 || cfg.windowHours == 0 || cfg.windowHours > 24
         ) revert InvalidConfig();
         _configs[++configVersion] = cfg;
         emit Configured(configVersion, cfg);
@@ -235,9 +238,15 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
 
     function _submit(bool buy, uint256 amount, string calldata reason) private returns (bytes32 id) {
         if (block.chainid != 1) revert WrongChain();
-        if (hook.gate() != address(this)) revert InvalidConfig();
-        if (activeRequest[msg.sender] != bytes32(0)) revert ActiveRequest();
         Config memory cfg = _configs[configVersion];
+        // The constructor could not read the hook; the hook must now report this gate, this pool and these tokens.
+        // poolKey() returns abi.encode(PoolKey), compared raw against the hash of the key built from the words.
+        (bool ok, bytes memory reported) = address(hook).staticcall(abi.encodeCall(hook.poolKey, ()));
+        if (
+            !ok || keccak256(reported) != _keyHash || hook.gate() != address(this) || hook.cabal() != address(cabal)
+                || address(hook.imd()) != cfg.imd
+        ) revert InvalidConfig();
+        if (activeRequest[msg.sender] != bytes32(0)) revert ActiveRequest();
         uint256 maxAmount = buy ? cfg.maxBuyAmount : cfg.maxSellAmount;
         if (amount == 0 || amount > maxAmount) revert LimitExceeded();
         uint256 balance = cabal.balanceOf(msg.sender);
