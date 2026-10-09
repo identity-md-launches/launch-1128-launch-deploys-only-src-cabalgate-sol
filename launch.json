@@ -1,0 +1,26 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "CabalGate",
+      "constructorArgs": [
+        "0xf41b6ff942a082c0d320a0c151310ac2a922a0c0",
+        "0x000000000004444c5dc75cb358380d2e3de08a90",
+        "0x450e5910decee15c3ac056e3ed66cb5ea3dd33be",
+        "$owner",
+        "0x1397434cd35e8a9c8ac312a61d3a285eb31dea56",
+        "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+        "0x5598aa9146215bc13eb26f2c692ad1461fd32982",
+        "0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000",
+        "1000000000000000000000000",
+        "10000000000000000000000000",
+        "300",
+        "500",
+        "30",
+        "20",
+        "1"
+      ]
+    }
+  ],
+  "notes": "Deploys only src/CabalGate.sol:CabalGate on Ethereum mainnet (chain id 1) for the live CabalHook 0xf41b6ff942a082c0d320a0c151310ac2a922a0c0 from launch 953. CabalHook and CabalCoin are not deployed or changed. Constructor words in declaration order: hook, poolManager (Uniswap v4 0x000000000004444c5dc75cb358380d2e3de08a90), cabal (0x450e5910decee15c3ac056e3ed66cb5ea3dd33be), initialOwner ($owner), intake (0x1397434cd35e8a9c8ac312a61d3a285eb31dea56), imd (0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7), signer (0x5598aa9146215bc13eb26f2c692ad1461fd32982), action (bytes32 'oracle.request@oracle-1'), maxBuyAmount 1000000 IMD (18 decimals), maxSellAmount 10000000 CABAL (18 decimals), maxImpactBps 300, maxDriftBps 500, panelSize 30, quorum 20, windowHours 1. The gate derives the pool key itself: currency0/currency1 are cabal and imd sorted by address (CABAL 0x450e... < IMD 0xd34a...), fee POOL_FEE = 12500, tick spacing POOL_TICK_SPACING = 60, hooks = hook; this matches the live hook's poolKey read on 2026-10-08. The constructor makes no external calls and no code-length checks, so it deploys in the factory's empty-EVM rehearsal; it creates QuestionBuilder and ImpactEstimator internally and builds Config with oracleVerifier = address(this) and boolAnswerType = 0. Every submission later requires hook.gate() == gate, hook.cabal() == cabal, hook.imd() == imd and keccak256(abi.encode(hook.poolKey())) equal to the stored key, and reverts InvalidConfig otherwise; the block.chainid == 1 check is kept. No token, pool, ETH funding or initialization call. After deployment the existing hook owner (0xFc3C962FAD2C1cC77f1a0d46e7B8a2De79A21774, owner of launch 953's hook) calls hook.setGate(gate) once; setGate requires gate.hook() == hook and gate.cabal() == CABAL and binds permanently, so the owner should first confirm hook.gate() is unset and hook.poolKey()/hook.imd() match the words above. Rehearsed in test/GateLaunch.t.sol."
+}
