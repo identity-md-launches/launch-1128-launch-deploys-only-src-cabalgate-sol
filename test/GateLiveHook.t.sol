@@ -102,8 +102,8 @@ contract GateLiveHookTest is GateLaunchFixture {
     function test_realHookRefusesGateBuiltWithSwappedTokenRoles() public {
         bytes memory arguments = _arguments();
         assembly ("memory-safe") {
-            mstore(add(arguments, 96), IMD) // cabal
-            mstore(add(arguments, 320), CABAL) // imd
+            mstore(add(arguments, 96), IMD) // cabal, word 2
+            mstore(add(arguments, 192), CABAL) // imd, word 5
         }
         CabalGate swapped = CabalGate(factory.deploy(_creation(arguments), keccak256("swapped on live hook")));
         assertEq(address(swapped.cabal()), IMD);
