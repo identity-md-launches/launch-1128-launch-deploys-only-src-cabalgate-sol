@@ -75,7 +75,8 @@ contract GateLaunchFactory {
     }
 }
 
-/// @dev The manifest's nineteen constructor words for the live hook of launch 953, as read on 2026-10-08.
+/// @dev The manifest's fifteen constructor words for the live hook of launch 953, as read on 2026-10-08. The pool
+///      fee and tick spacing are constants of the gate, and the currencies are CABAL and IMD sorted by address.
 abstract contract GateLaunchWords is Test {
     using PoolIdLibrary for PoolKey;
 
@@ -86,20 +87,17 @@ abstract contract GateLaunchWords is Test {
     address internal constant IMD = 0xD34a99Bc0f67aE1bbd63C660e6d0b0dd03E263B7;
     address internal constant SIGNER = 0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982;
     bytes32 internal constant ACTION = 0x6f7261636c652e72657175657374406f7261636c652d31000000000000000000;
+    /// @dev The live pool's fee and tick spacing, which CabalHook.beforeInitialize accepts and nothing else.
     uint24 internal constant FEE = 12500;
-    uint24 internal constant TICK_SPACING = 60;
+    int24 internal constant TICK_SPACING = 60;
 
-    /// @dev Order: hook, poolManager, cabal, currency0, currency1, fee, tickSpacing, initialOwner, intake, imd,
-    ///      signer, action, maxBuyAmount, maxSellAmount, maxImpactBps, maxDriftBps, panelSize, quorum, windowHours.
+    /// @dev Order: hook, poolManager, cabal, initialOwner, intake, imd, signer, action, maxBuyAmount, maxSellAmount,
+    ///      maxImpactBps, maxDriftBps, panelSize, quorum, windowHours.
     function _words(address owner) internal pure returns (bytes memory) {
         return abi.encode(
             HOOK,
             POOL_MANAGER,
             CABAL,
-            CABAL,
-            IMD,
-            FEE,
-            TICK_SPACING,
             owner,
             INTAKE,
             IMD,
@@ -115,8 +113,14 @@ abstract contract GateLaunchWords is Test {
         );
     }
 
+    /// @dev The key the constructor derives from the words: CABAL sorts below IMD, so it is currency0.
     function _manifestKey() internal pure returns (PoolKey memory) {
-        return PoolKey(Currency.wrap(CABAL), Currency.wrap(IMD), FEE, int24(TICK_SPACING), IHooks(HOOK));
+        return _sortedKey(CABAL, IMD, HOOK);
+    }
+
+    function _sortedKey(address cabal, address imd, address hook) internal pure returns (PoolKey memory) {
+        (address c0, address c1) = cabal < imd ? (cabal, imd) : (imd, cabal);
+        return PoolKey(Currency.wrap(c0), Currency.wrap(c1), FEE, TICK_SPACING, IHooks(hook));
     }
 
     function _creation(bytes memory arguments) internal view returns (bytes memory) {
@@ -155,7 +159,7 @@ contract GateEmptyEvmLaunchTest is GateLaunchWords {
         assertEq(CABAL.code.length, 0, "cabal must have no code in this rehearsal");
 
         bytes memory arguments = _words(owner);
-        assertEq(arguments.length, 19 * 32);
+        assertEq(arguments.length, 15 * 32, "the manifest allows at most sixteen words");
         bytes memory creation = _creation(arguments);
         assertLe(creation.length, 49_152, "init code exceeds the factory bound");
         GateLaunchFactory factory = new GateLaunchFactory();
@@ -170,6 +174,8 @@ contract GateEmptyEvmLaunchTest is GateLaunchWords {
         assertEq(address(gate.hook()), HOOK, "hook() getter must return the supplied hook");
         assertEq(address(gate.cabal()), CABAL, "cabal() getter must return the supplied CABAL");
         assertEq(address(gate.poolManager()), POOL_MANAGER);
+        assertEq(gate.POOL_FEE(), FEE, "pool fee is a constant of the gate");
+        assertEq(gate.POOL_TICK_SPACING(), TICK_SPACING, "tick spacing is a constant of the gate");
         assertEq(address(gate.estimator().poolManager()), POOL_MANAGER);
         assertEq(gate.owner(), owner);
         assertNotEq(gate.owner(), address(factory));
@@ -185,7 +191,7 @@ contract GateEmptyEvmLaunchTest is GateLaunchWords {
 }
 
 /// @dev The live addresses carry mocks of what the gate reads there after launch; the gate itself is deployed from
-///      the same nineteen words as above.
+///      the same fifteen words as above.
 abstract contract GateLaunchFixture is GateLaunchWords {
     address internal launchOwner;
     address internal hookOwner;
@@ -213,7 +219,11 @@ abstract contract GateLaunchFixture is GateLaunchWords {
     ///      the manifest key, served by the PoolManager address the gate was built with.
     function _preparePool() internal {
         vm.etch(CABAL, IMD.code);
-        bytes32 stateSlot = keccak256(abi.encode(PoolId.unwrap(_manifestKey().toId()), StateLibrary.POOLS_SLOT));
+        _preparePoolFor(_manifestKey());
+    }
+
+    function _preparePoolFor(PoolKey memory key) internal {
+        bytes32 stateSlot = keccak256(abi.encode(PoolId.unwrap(key.toId()), StateLibrary.POOLS_SLOT));
         vm.mockCall(
             POOL_MANAGER, abi.encodeWithSignature("extsload(bytes32)", stateSlot), abi.encode(bytes32(uint256(1 << 96)))
         );
@@ -225,11 +235,15 @@ abstract contract GateLaunchFixture is GateLaunchWords {
     }
 
     function _fund(address user, CabalGate gate) internal {
+        _fund(user, gate, CABAL);
+    }
+
+    function _fund(address user, CabalGate gate, address cabal) internal {
         MockERC20(IMD).mint(user, 1000 ether);
-        MockERC20(CABAL).mint(user, 1000 ether);
+        MockERC20(cabal).mint(user, 1000 ether);
         vm.startPrank(user);
         IERC20(IMD).approve(address(gate), type(uint256).max);
-        IERC20(CABAL).approve(address(gate), type(uint256).max);
+        IERC20(cabal).approve(address(gate), type(uint256).max);
         vm.stopPrank();
     }
 
@@ -262,9 +276,9 @@ abstract contract GateLaunchFixture is GateLaunchWords {
 }
 
 contract GateLaunchTest is GateLaunchFixture {
-    function test_factoryDeploysOnlyGateWithAllNineteenManifestWords() public {
+    function test_factoryDeploysOnlyGateWithAllFifteenManifestWords() public {
         bytes memory arguments = _arguments();
-        assertEq(arguments.length, 19 * 32);
+        assertEq(arguments.length, 15 * 32);
         bytes memory creation = _creation(arguments);
         bytes32 salt = keccak256("gate launch");
         address predicted = vm.computeCreate2Address(salt, keccak256(creation), address(factory));
@@ -282,11 +296,49 @@ contract GateLaunchTest is GateLaunchFixture {
         // The words describe the pool the hook reports; the hook owner should recompute this before binding,
         // because setGate compares only hook() and cabal() and a wrong key would be bound for good.
         assertEq(keccak256(abi.encode(_manifestKey())), keccak256(abi.encode(MockLaunchHook(HOOK).poolKey())));
+        assertEq(gate.POOL_FEE(), MockLaunchHook(HOOK).poolKey().fee);
+        assertEq(gate.POOL_TICK_SPACING(), MockLaunchHook(HOOK).poolKey().tickSpacing);
         // The existing hook remains unbound until its own owner performs the handoff.
         assertEq(MockLaunchHook(HOOK).gate(), address(0));
         _assertRuntime(address(gate));
         _assertRuntime(address(gate.questionBuilder()));
         _assertRuntime(address(gate.estimator()));
+    }
+
+    /// @dev The constructor sorts CABAL and IMD into currency0/currency1 itself. The live CABAL sorts below IMD;
+    ///      with a CABAL above IMD the derived key must still be the one the hook reports, or no request could pass.
+    function test_constructorSortsCurrenciesWhenCabalSortsAboveImd() public {
+        address highCabal = address(type(uint160).max - 1);
+        address highHook = makeAddr("hook of a CABAL above IMD");
+        assertGt(uint160(highCabal), uint160(IMD));
+        vm.etch(highCabal, IMD.code);
+        deployCodeTo("GateLaunch.t.sol:MockLaunchHook", abi.encode(hookOwner, highCabal, IMD), highHook);
+        PoolKey memory reported = MockLaunchHook(highHook).poolKey();
+        assertEq(Currency.unwrap(reported.currency0), IMD);
+        assertEq(Currency.unwrap(reported.currency1), highCabal);
+        assertEq(keccak256(abi.encode(reported)), keccak256(abi.encode(_sortedKey(highCabal, IMD, highHook))));
+
+        bytes memory arguments = _arguments();
+        assembly ("memory-safe") {
+            mstore(add(arguments, 32), highHook) // hook
+            mstore(add(arguments, 96), highCabal) // cabal
+        }
+        CabalGate gate = CabalGate(factory.deploy(_creation(arguments), keccak256("sorted the other way")));
+        assertEq(address(gate.hook()), highHook);
+        assertEq(address(gate.cabal()), highCabal);
+        _preparePoolFor(reported);
+        address user = makeAddr("sorted user");
+        _fund(user, gate, highCabal);
+        _assertRefused(gate, user, true);
+        vm.prank(hookOwner);
+        MockLaunchHook(highHook).setGate(address(gate));
+        _assertAccepted(gate, user, true);
+        // A hook reporting the same tokens in the wrong order is not the pool the gate was built for.
+        MockLaunchHook(highHook)
+            .reportKey(PoolKey(Currency.wrap(highCabal), Currency.wrap(IMD), FEE, TICK_SPACING, IHooks(highHook)));
+        address other = makeAddr("second sorted user");
+        _fund(other, gate, highCabal);
+        _assertRefused(gate, other, false);
     }
 
     function test_existingHookOwnerBindsGateOnceAndRefusesSecondGate() public {
@@ -312,8 +364,8 @@ contract GateLaunchTest is GateLaunchFixture {
     function test_hookRefusesGateWithSwappedTokenRoles() public {
         bytes memory arguments = _arguments();
         assembly ("memory-safe") {
-            mstore(add(arguments, 96), IMD) // cabal
-            mstore(add(arguments, 320), CABAL) // imd
+            mstore(add(arguments, 96), IMD) // cabal, word 2
+            mstore(add(arguments, 192), CABAL) // imd, word 5
         }
         CabalGate swapped = CabalGate(factory.deploy(_creation(arguments), keccak256("swapped roles")));
         assertEq(address(swapped.cabal()), IMD);
@@ -438,53 +490,18 @@ contract GateLaunchTest is GateLaunchFixture {
     }
 
     function test_flatConstructorRetainsEveryValidation() public {
-        // ABI word index, bad value: hook 0, poolManager 1, cabal 2, currency0 3, currency1 4, fee 5,
-        // tickSpacing 6, owner 7, intake 8, imd 9, signer 10, action 11, maxBuy 12, maxSell 13, impact 14,
-        // drift 15, panel 16, quorum 17, window 18.
-        uint256[29] memory indices = [
-            uint256(0),
-            1,
-            2,
-            2,
-            3,
-            3,
-            4,
-            6,
-            6,
-            8,
-            9,
-            9,
-            10,
-            11,
-            12,
-            13,
-            12,
-            13,
-            14,
-            14,
-            15,
-            15,
-            16,
-            16,
-            17,
-            17,
-            18,
-            18,
-            7
-        ];
-        uint256[29] memory values = [
+        // ABI word index, bad value: hook 0, poolManager 1, cabal 2, owner 3, intake 4, imd 5, signer 6,
+        // action 7, maxBuy 8, maxSell 9, impact 10, drift 11, panel 12, quorum 13, window 14.
+        uint256[25] memory indices =
+            [uint256(0), 1, 2, 2, 4, 5, 5, 6, 7, 8, 9, 8, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 3, 3];
+        uint256[25] memory values = [
             uint256(0),
             0,
             0,
-            uint256(uint160(INTAKE)), // cabal is neither currency
-            0,
-            uint256(uint160(IMD)), // currency0 == currency1
-            uint256(uint160(CABAL)), // currency1 == currency0
-            0,
-            uint256(uint24(type(int24).max)) + 1,
+            uint256(uint160(IMD)), // cabal == imd: no sorted pair
             0,
             0,
-            uint256(uint160(INTAKE)), // imd is not the other currency
+            uint256(uint160(CABAL)), // imd == cabal
             0,
             0,
             0,
@@ -501,7 +518,8 @@ contract GateLaunchTest is GateLaunchFixture {
             31, // quorum above panel
             0,
             25,
-            0 // zero owner
+            0, // zero owner
+            uint256(uint160(POOL_MANAGER)) | (1 << 160) // dirty address word
         ];
         for (uint256 i; i < indices.length; ++i) {
             bytes memory arguments = _arguments();
@@ -514,15 +532,6 @@ contract GateLaunchTest is GateLaunchFixture {
             vm.expectRevert("application constructor failed");
             factory.deploy(creation, bytes32(i));
         }
-        // Swapped currencies violate currency0 < currency1 (IMD sorts after CABAL).
-        bytes memory swapped = _arguments();
-        assembly ("memory-safe") {
-            mstore(add(swapped, 128), IMD)
-            mstore(add(swapped, 160), CABAL)
-        }
-        bytes memory swappedCreation = _creation(swapped);
-        vm.expectRevert("application constructor failed");
-        factory.deploy(swappedCreation, keccak256("swapped currencies"));
     }
 
     /// @dev The constructor needs nothing at the dependency addresses, before or after they have code.

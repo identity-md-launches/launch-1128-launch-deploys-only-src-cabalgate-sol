@@ -23,10 +23,6 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
             HOOK,
             POOL_MANAGER,
             CABAL,
-            CABAL,
-            IMD,
-            FEE,
-            TICK_SPACING,
             launchOwner,
             INTAKE,
             IMD,
@@ -88,9 +84,9 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
 
     function test_constructorRejectsDirtyHighBitsInEveryNarrowWord() public {
         // A static-word factory must not silently truncate an address or an integer.
-        for (uint256 index; index < 19; ++index) {
-            if (index == 11) continue; // bytes32 action uses all 256 bits.
-            uint256 width = index < 5 ? 160 : index < 7 ? 24 : index < 11 ? 160 : index < 14 ? 128 : index < 18 ? 16 : 8;
+        for (uint256 index; index < 15; ++index) {
+            if (index == 7) continue; // bytes32 action uses all 256 bits.
+            uint256 width = index < 7 ? 160 : index < 10 ? 128 : index < 14 ? 16 : 8;
             bytes memory args = _arguments();
             assembly ("memory-safe") {
                 let word := add(add(args, 32), mul(index, 32))
@@ -103,7 +99,7 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
     }
 
     function test_constructorRejectsTruncatedStaticArguments() public {
-        for (uint256 words; words < 19; ++words) {
+        for (uint256 words; words < 15; ++words) {
             bytes memory args = _arguments();
             assembly ("memory-safe") {
                 mstore(args, mul(words, 32))
@@ -144,7 +140,7 @@ contract GateFactoryEdgesTest is GateLaunchFixture {
         // deployment, including those child contracts, and leave nothing behind at the predicted address.
         bytes memory bad = _arguments();
         assembly ("memory-safe") {
-            mstore(add(bad, 576), 0) // quorum
+            mstore(add(bad, 448), 0) // quorum, word 13
         }
         bytes memory creation = _creation(bad);
         bytes32 salt = keccak256("failed gate constructor");

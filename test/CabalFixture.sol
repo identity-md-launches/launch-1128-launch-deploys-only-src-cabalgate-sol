@@ -96,11 +96,11 @@ abstract contract CabalFixture is Test {
         manager.initialize(key, price);
     }
 
-    /// @dev The launch constructor takes the pool as flat words and never reads the hook; here they are copied
-    ///      from the local hook so the gate describes the pool the hook bound.
+    /// @dev The launch constructor takes flat words and never reads the hook; it derives the pool key from CABAL
+    ///      and IMD (sorted) with the constant fee and tick spacing. Here the tokens are copied from the local hook
+    ///      so the gate describes the pool the hook bound, in whichever order the fixture placed them.
     function deployGate(CabalHook launchHook) internal returns (CabalGate) {
         CabalGate.Config memory cfg = defaultConfig();
-        PoolKey memory hookKey = launchHook.poolKey();
         return CabalGate(
             deployCode(
                 "CabalGate.sol:CabalGate",
@@ -108,10 +108,6 @@ abstract contract CabalFixture is Test {
                     launchHook,
                     launchHook.poolManager(),
                     launchHook.cabal(),
-                    Currency.unwrap(hookKey.currency0),
-                    Currency.unwrap(hookKey.currency1),
-                    hookKey.fee,
-                    uint24(hookKey.tickSpacing),
                     address(this),
                     cfg.intake,
                     cfg.imd,

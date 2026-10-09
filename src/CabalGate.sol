@@ -100,6 +100,10 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     /// @dev Sanity bound on expiresAt - issuedAt.
     uint256 public constant MAX_VALIDITY = 1 days;
     address public constant IDENTITY_NFT = MainnetDefaults.IDENTITY_NFT;
+    /// @dev The pool the hook binds (CabalHook.beforeInitialize accepts only fee 12500 and tick spacing 60); the
+    ///      launch manifest allows at most sixteen constructor words, so they are constants rather than arguments.
+    uint24 public constant POOL_FEE = 12_500;
+    int24 public constant POOL_TICK_SPACING = 60;
     CabalHook public immutable hook;
     IPoolManager public immutable poolManager;
     IERC20 public immutable cabal;
@@ -130,15 +134,12 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     /// @dev Launch constructor: flat static words only, no external calls and no code-length checks, because the
     ///      launch factory rehearses deployment in an EVM where the hook, PoolManager, Intake and IMD have no code.
     ///      The hook's own view of the pool (gate, CABAL, IMD, poolKey) is checked at every submission instead.
-    ///      `tickSpacing` is an unsigned word because the launch ABI has no signed integers; it is narrowed to int24.
+    ///      The pool key is derived here: currency0 is the lower of CABAL and IMD, currency1 the higher, with the
+    ///      constant fee and tick spacing and `hooks = hook`, so the manifest carries fifteen words.
     constructor(
         CabalHook launchHook,
         IPoolManager manager,
         address cabalToken,
-        address currency0,
-        address currency1,
-        uint24 fee,
-        uint24 tickSpacing,
         address initialOwner,
         address intake,
         address imd,
@@ -154,16 +155,14 @@ contract CabalGate is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     ) Ownable(initialOwner) {
         if (
             address(launchHook) == address(0) || address(manager) == address(0) || cabalToken == address(0)
-                || currency0 == address(0) || currency0 >= currency1
-                || (cabalToken != currency0 && cabalToken != currency1)
-                || imd != (cabalToken == currency0 ? currency1 : currency0) || tickSpacing == 0
-                || tickSpacing > uint24(type(int24).max)
+                || imd == address(0) || cabalToken == imd
         ) revert InvalidConfig();
         hook = launchHook;
         poolManager = manager;
         cabal = IERC20(cabalToken);
+        (address currency0, address currency1) = cabalToken < imd ? (cabalToken, imd) : (imd, cabalToken);
         _key = PoolKey(
-            Currency.wrap(currency0), Currency.wrap(currency1), fee, int24(tickSpacing), IHooks(address(launchHook))
+            Currency.wrap(currency0), Currency.wrap(currency1), POOL_FEE, POOL_TICK_SPACING, IHooks(address(launchHook))
         );
         _keyHash = keccak256(abi.encode(_key));
         questionBuilder = new QuestionBuilder();

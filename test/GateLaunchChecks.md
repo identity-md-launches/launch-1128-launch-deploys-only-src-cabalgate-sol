@@ -1,6 +1,6 @@
 # Gate-only test verification
 
-Historical record of an earlier tests-only revision, kept as written at the time. It predates the launch 990 adaptation: the constructor now takes nineteen flat words and reads nothing from the chain (see `ADAPTATION.md`), `launch.json` has been removed from the tree, and the counts below are from that earlier revision.
+Historical record of an earlier tests-only revision, kept as written at the time. It predates the launch 990 adaptation: the constructor now takes fifteen flat words and reads nothing from the chain (see `ADAPTATION.md`), `launch.json` has been removed from the tree, and the counts below are from that earlier revision.
 
 The production constructor at that time had thirteen flat arguments. Tests reuse the initialized-hook mock and existing dependencies; the added suites do not deploy CabalHook or CabalCoin. The existing launch fixture was extracted into an abstract base without changing its assertions.
 
